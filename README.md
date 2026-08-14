@@ -1,8 +1,10 @@
-# 🐍 PUGILAIN IP GRB
-
 <p align="center">
-  <img src="https://www.python.org/static/community_logos/python-logo.png" alt="Python" width="300">
+  <a href="https://kommodo.ai/i/D8p1OMNIOvPIFm6MoLvC">
+    <img src="https://plain-weur-prod-public.komododecks.com/202608/14/D8p1OMNIOvPIFm6MoLvC/image.png" alt="PUGILAIN IP GRB">
+  </a>
 </p>
+
+<h1 align="center">🐍 PUGILAIN IP GRB</h1>
 
 <p align="center">
   <b>Python Network Diagnostics & Consent-Based Data Collection</b>
@@ -26,6 +28,7 @@ Use this software only when you have the appropriate authorization and, where re
 The user is solely responsible for their use of this software and for complying with all applicable laws, regulations and privacy requirements.
 
 The author does **not** encourage unauthorized tracking, monitoring, profiling or collection of personal information.
+
 
 ---
 
