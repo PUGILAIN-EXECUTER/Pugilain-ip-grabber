@@ -1,22 +1,22 @@
 @echo off
 setlocal
-title Setup Python
+title Python Project Setup
 
 echo ========================================
-echo        SETUP PROGETTO PYTHON
+echo          PYTHON PROJECT SETUP
 echo ========================================
 echo.
 
-:: Controlla Python
-echo [1/4] Controllo Python...
+:: Check Python
+echo [1/4] Checking Python...
 
 where python >nul 2>&1
 
 if %errorlevel% neq 0 (
     echo.
-    echo [ERRORE] Python non e' installato oppure non e' presente nel PATH.
+    echo [ERROR] Python is not installed or is not in PATH.
     echo.
-    echo Installa Python da:
+    echo Download Python from:
     echo https://www.python.org/downloads/windows/
     echo.
     pause
@@ -24,91 +24,132 @@ if %errorlevel% neq 0 (
 )
 
 python --version
+
 if %errorlevel% neq 0 (
-    echo [ERRORE] Python non funziona correttamente.
+    echo [ERROR] Python is not working correctly.
     pause
     exit /b 1
 )
 
-echo Python trovato!
+echo Python found!
 echo.
 
-:: Controlla pip
-echo [2/4] Controllo pip...
+:: Check pip
+echo [2/4] Checking pip...
 
 python -m pip --version >nul 2>&1
 
 if %errorlevel% neq 0 (
-    echo [ERRORE] pip non e' disponibile.
-    echo Provo a installarlo...
-    
+    echo [ERROR] pip is not available.
+    echo Attempting to install pip...
+
     python -m ensurepip --upgrade
-    
+
     if %errorlevel% neq 0 (
-        echo [ERRORE] Impossibile installare pip.
+        echo [ERROR] Unable to install pip.
         pause
         exit /b 1
     )
 )
 
-echo pip trovato!
+echo pip found!
 echo.
 
-:: Crea ambiente virtuale
-echo [3/4] Creazione ambiente virtuale...
+:: Create virtual environment
+echo [3/4] Creating virtual environment...
 
 if not exist ".venv" (
     python -m venv .venv
-    
+
     if %errorlevel% neq 0 (
-        echo [ERRORE] Impossibile creare il virtual environment.
+        echo [ERROR] Unable to create the virtual environment.
         pause
         exit /b 1
     )
-    
-    echo Ambiente virtuale creato!
+
+    echo Virtual environment created!
 ) else (
-    echo Ambiente virtuale gia' presente.
+    echo Virtual environment already exists.
 )
 
 echo.
 
-:: Installa requests
-echo [4/4] Installazione dipendenze...
+:: Activate virtual environment
+call ".venv\Scripts\activate.bat"
 
-call .venv\Scripts\activate.bat
+if %errorlevel% neq 0 (
+    echo [ERROR] Unable to activate the virtual environment.
+    pause
+    exit /b 1
+)
+
+echo Virtual environment activated!
+echo.
+
+:: Install dependencies
+echo [4/4] Installing dependencies...
 
 python -m pip install --upgrade pip
-python -m pip install requests
+
+if %errorlevel% neq 0 (
+    echo [ERROR] Failed to upgrade pip.
+    pause
+    exit /b 1
+)
+
+if exist "requirements.txt" (
+    python -m pip install -r requirements.txt
+) else (
+    python -m pip install requests
+)
 
 if %errorlevel% neq 0 (
     echo.
-    echo [ERRORE] Installazione di requests fallita.
+    echo [ERROR] Failed to install dependencies.
     pause
     exit /b 1
 )
 
 echo.
 echo ========================================
-echo          INSTALLAZIONE COMPLETATA
+echo        INSTALLATION COMPLETED
 echo ========================================
 echo.
+
 echo Python:
 python --version
+
 echo.
-echo requests:
+echo Requests:
 python -m pip show requests | findstr "Name Version"
+
+echo.
+echo ========================================
+echo          STARTING APPLICATION
+echo ========================================
 echo.
 
-:: Avvia il programma
-if exist "main.py" (
-    echo Avvio main.py...
+:: ipgrabber.py must be in the same folder as setup.bat
+if not exist "ipgrabber.py" (
+    echo [ERROR] ipgrabber.py was not found.
     echo.
-    python main.py
-) else (
-    echo main.py non trovato.
-    echo Metti questo file .bat nella cartella del progetto.
+    echo Make sure ipgrabber.py is located in the
+    echo same folder as setup.bat.
+    echo.
+    pause
+    exit /b 1
 )
 
+echo [OK] ipgrabber.py found.
+echo [OK] Starting application...
 echo.
+
+python ipgrabber.py
+
+echo.
+echo ========================================
+echo          APPLICATION CLOSED
+echo ========================================
+echo.
+
 pause
