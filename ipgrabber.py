@@ -1,65 +1,39 @@
-import base64
-import hashlib
-import html
-import ipaddress
-import json
 import os
-import platform
-import secrets
-import socket
 import sys
-import threading
+import json
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
+import uuid
+import socket
+import secrets
+import hashlib
+import threading
 import webbrowser
-from datetime import datetime
-from http.server import BaseHTTPRequestHandler
-from http.server import ThreadingHTTPServer
+from datetime import datetime, timezone
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
-APP_NAME = "PUGILAIN IP GRB"
-APP_VERSION = "3.0"
+APP_NAME = "PUGILAIN LOCAL GEO"
+VERSION = "4.0"
 HOST = "127.0.0.1"
 PORT = 5000
-PROJECT_NAME = "Ipporject"
-GEO_PROVIDER = "https://ipapi.co"
-MAX_BODY_SIZE = 16384
-GEO_TIMEOUT = 8
-CONSENT_VERSION = "1.0"
 
-BANNER = r"""
-::::::::::.  ...    :::  .,-:::::/  ::: :::       :::.      ::::::.    :::.   :::     .,-:::::/  
- `;;;```.;;; ;;     ;;;,;;-'````'   ;;; ;;;       ;;`;;     ;;;`;;;;,  `;;;   ;;;   ,;;-'````'   
-  `]]nnn]]' [['     [[[[[[   [[[[[[/[[[ [[[      ,[[ '[[,   [[[  [[[[[. '[[   [[[   [[[   [[[[[[/
-   $$$""    $$      $$$"$$c.    "$$ $$$ $$'     c$$$cc$$$c  $$$  $$$ "Y$c$$   $$$   "$$c.    "$$ 
-   888o     88    .d888 `Y8bo,,,o88o888o88oo,.__ 888   888  888  888    Y88   888d8b `Y8bo,,,o88o
-   YMMMb     "YmmMMMM""   `'YMUP"YMMMMM""""YUMMM YMM   \"\"`MMM  MMM     YM   MMMYMP   `'YMUP"YMM
-                                      PUGILAIN IP GRABBER
-                                                                                                 
-                                                                                      
-"""
+BASE_DIR = os.path.join(os.path.expanduser("~"), "Desktop", "PugilainLocalGeo")
+HISTORY_FILE = os.path.join(BASE_DIR, "history.json")
+INSTANCE_FILE = os.path.join(BASE_DIR, "instance.json")
+KEY_FILE = os.path.join(BASE_DIR, "key.txt")
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
-START_TIME = time.time()
-SERVER = None
-SERVER_THREAD = None
-SERVER_LOCK = threading.RLock()
-STATE_LOCK = threading.RLock()
-RATE_LOCK = threading.RLock()
+LOCK = threading.RLock()
 
-RUNTIME = {
+STATE = {
+    "started": time.time(),
     "requests": 0,
-    "consented": 0,
-    "successful": 0,
-    "failed": 0,
-    "last_result": None,
-    "started": False,
-    "stopped": False
-}
-
-RATE_STATE = {
-    "started": time.monotonic(),
-    "count": 0
+    "accepted": 0,
+    "rejected": 0,
+    "errors": 0,
+    "last_activity": None
 }
 
 
@@ -67,2251 +41,505 @@ def clear():
     os.system("cls" if os.name == "nt" else "clear")
 
 
-def terminal(text):
-    sys.stdout.write(str(text))
-    sys.stdout.flush()
-
-
-def slow_print(text, delay=0.003):
-    for char in str(text):
-        terminal(char)
+def slow_print(text, delay=0.008):
+    for char in text:
+        print(char, end="", flush=True)
         time.sleep(delay)
     print()
 
 
-def loading_animation(duration, message):
-    chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+def loading(text, duration=1.0):
+    sequence = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     end = time.time() + duration
+    index = 0
+
     while time.time() < end:
-        for char in chars:
-            if time.time() >= end:
-                break
-            terminal(f"\r\033[96m{char} {message}\033[0m")
-            time.sleep(0.07)
-    terminal("\r" + " " * 90 + "\r")
+        print("\r" + text + " " + sequence[index % len(sequence)], end="", flush=True)
+        index += 1
+        time.sleep(0.07)
 
+    print("\r" + text + " ✓")
 
-def get_timestamp():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+def banner():
+    print()
+    print("╔══════════════════════════════════════════════════════════════════════════════╗")
+    print("║                                                                              ║")
+    print("║   ██████╗ ██╗   ██╗  ██████╗  ██╗ ██╗       █████╗  ██╗ ███╗   ██╗        ║")
+    print("║   ██╔══██╗██║   ██║ ██╔════╝  ██║ ██║      ██╔══██╗ ██║ ████╗  ██║        ║")
+    print("║   ██████╔╝██║   ██║ ██║  ███╗ ██║ ██║      ███████║ ██║ ██╔██╗ ██║        ║")
+    print("║   ██╔═══╝ ██║   ██║ ██║   ██║ ██║ ██║      ██╔══██║ ██║ ██║╚██╗██║        ║")
+    print("║   ██║     ╚██████╔╝ ╚██████╔╝ ██║ ███████╗ ██║  ██║ ██║ ██║ ╚████║        ║")
+    print("║   ╚═╝      ╚═════╝   ╚═════╝  ╚═╝ ╚══════╝ ╚═╝  ╚═╝ ╚═╝ ╚═╝  ╚═══╝        ║")
+    print("║                                                                              ║")
+    print("║                       ◈  LOCAL GEO CONSOLE  ◈                             ║")
+    print("║                                                                              ║")
+    print("║                    CONSENSO • HISTORY • DASHBOARD                          ║")
+    print("║                                                                              ║")
+    print("╚══════════════════════════════════════════════════════════════════════════════╝")
+    print()
 
-def get_iso_timestamp():
-    return datetime.now().isoformat(timespec="seconds")
 
+def ensure_directory():
+    os.makedirs(BASE_DIR, exist_ok=True)
 
-def get_unix_timestamp():
-    return int(time.time())
 
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
 
-def format_uptime(seconds):
-    value = max(0, int(seconds))
-    days, value = divmod(value, 86400)
-    hours, value = divmod(value, 3600)
-    minutes, seconds = divmod(value, 60)
 
-    if days:
-        return f"{days}d {hours}h {minutes}m {seconds}s"
+def generate_instance_id():
+    seed = "|".join([
+        socket.gethostname(),
+        sys.platform,
+        str(uuid.getnode()),
+        os.path.abspath(BASE_DIR)
+    ])
 
-    if hours:
-        return f"{hours}h {minutes}m {seconds}s"
+    return hashlib.sha256(seed.encode()).hexdigest()[:32]
 
-    if minutes:
-        return f"{minutes}m {seconds}s"
 
-    return f"{seconds}s"
+def generate_key():
+    return secrets.token_urlsafe(32)
 
 
-def format_bytes(value):
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return "0.00 B"
+def initialize_instance():
+    ensure_directory()
 
-    units = ["B", "KB", "MB", "GB", "TB"]
+    if os.path.exists(INSTANCE_FILE):
+        try:
+            with open(INSTANCE_FILE, "r", encoding="utf-8") as file:
+                instance = json.load(file)
 
-    for unit in units:
-        if number < 1024:
-            return f"{number:.2f} {unit}"
-        number /= 1024
+            if instance.get("instance_id"):
+                return instance
 
-    return f"{number:.2f} PB"
+        except Exception:
+            pass
 
-
-def encode_base64(data):
-    raw = json.dumps(
-        data,
-        ensure_ascii=False
-    ).encode("utf-8")
-
-    return base64.urlsafe_b64encode(raw).decode("ascii")
-
-
-def decode_base64(data):
-    raw = base64.urlsafe_b64decode(
-        data.encode("ascii")
-    )
-
-    return json.loads(
-        raw.decode("utf-8")
-    )
-
-
-def generate_device_id():
-    material = "|".join(
-        [
-            platform.system(),
-            platform.release(),
-            platform.machine(),
-            platform.python_version()
-        ]
-    )
-
-    digest = hashlib.sha256(
-        material.encode("utf-8")
-    ).hexdigest()
-
-    return digest[:16]
-
-
-def generate_token():
-    return secrets.token_urlsafe(48)
-
-
-def safe_text(value, default="N/A"):
-    if value is None:
-        return default
-
-    value = str(value).strip()
-
-    if not value:
-        return default
-
-    return value
-
-
-def html_text(value, default="N/A"):
-    return html.escape(
-        safe_text(value, default)
-    )
-
-
-def desktop_path():
-    return os.path.join(
-        os.path.expanduser("~"),
-        "Desktop"
-    )
-
-
-def get_project_folder():
-    preferred = os.path.join(
-        desktop_path(),
-        PROJECT_NAME
-    )
-
-    try:
-        os.makedirs(
-            preferred,
-            exist_ok=True
-        )
-        return preferred
-    except OSError:
-        fallback = os.path.join(
-            os.path.expanduser("~"),
-            "." + PROJECT_NAME.lower()
-        )
-
-        os.makedirs(
-            fallback,
-            exist_ok=True
-        )
-
-        return fallback
-
-
-PROJECT_FOLDER = get_project_folder()
-
-INSTANCE_FILE = os.path.join(
-    PROJECT_FOLDER,
-    ".instance.json"
-)
-
-KEY_FILE = os.path.join(
-    PROJECT_FOLDER,
-    "key.txt"
-)
-
-CONFIG_FILE = os.path.join(
-    PROJECT_FOLDER,
-    "config.json"
-)
-
-LOG_FILE = os.path.join(
-    PROJECT_FOLDER,
-    "system.log"
-)
-
-
-def read_text(path, default=""):
-    try:
-        with open(
-            path,
-            "r",
-            encoding="utf-8"
-        ) as file:
-            return file.read()
-    except (OSError, UnicodeError):
-        return default
-
-
-def write_text(path, value):
-    with open(
-        path,
-        "w",
-        encoding="utf-8"
-    ) as file:
-        file.write(value)
-
-
-def load_json(path, default=None):
-    if default is None:
-        default = {}
-
-    try:
-        with open(
-            path,
-            "r",
-            encoding="utf-8"
-        ) as file:
-            data = json.load(file)
-
-        if isinstance(data, dict):
-            return data
-
-        return default
-
-    except (
-        OSError,
-        ValueError,
-        TypeError,
-        UnicodeError
-    ):
-        return default
-
-
-def save_json(path, data):
-    temporary = path + ".tmp"
-
-    with open(
-        temporary,
-        "w",
-        encoding="utf-8"
-    ) as file:
-        json.dump(
-            data,
-            file,
-            ensure_ascii=False,
-            indent=4
-        )
-
-    os.replace(
-        temporary,
-        path
-    )
-
-
-def log_message(message):
-    timestamp = get_timestamp()
-
-    line = (
-        f"[{timestamp}] "
-        f"{safe_text(message, '')}\n"
-    )
-
-    try:
-        with open(
-            LOG_FILE,
-            "a",
-            encoding="utf-8"
-        ) as file:
-            file.write(line)
-    except OSError:
-        pass
-
-    print(
-        f"\033[90m[{timestamp}] "
-        f"{safe_text(message, '')}\033[0m"
-    )
-
-
-def validate_ip(value):
-    try:
-        ipaddress.ip_address(
-            str(value)
-        )
-        return True
-    except ValueError:
-        return False
-
-
-def normalize_ip(value):
-    value = safe_text(
-        value,
-        ""
-    )
-
-    if not validate_ip(value):
-        return ""
-
-    return value
-
-
-def is_private_ip(value):
-    try:
-        address = ipaddress.ip_address(
-            str(value)
-        )
-    except ValueError:
-        return True
-
-    return any(
-        [
-            address.is_private,
-            address.is_loopback,
-            address.is_link_local,
-            address.is_reserved,
-            address.is_multicast,
-            address.is_unspecified
-        ]
-    )
-
-
-def get_local_ip():
-    try:
-        with socket.socket(
-            socket.AF_INET,
-            socket.SOCK_DGRAM
-        ) as sock:
-            sock.connect(
-                ("1.1.1.1", 80)
-            )
-
-            return sock.getsockname()[0]
-
-    except OSError:
-        return "127.0.0.1"
-
-
-def get_hostname():
-    try:
-        return socket.gethostname()
-    except OSError:
-        return "unknown"
-
-
-def get_server_url():
-    return f"http://{HOST}:{PORT}"
-
-
-def get_lan_url():
-    return f"http://{get_local_ip()}:{PORT}"
-
-
-def port_available(host, port):
-    try:
-        with socket.socket(
-            socket.AF_INET,
-            socket.SOCK_STREAM
-        ) as sock:
-            sock.setsockopt(
-                socket.SOL_SOCKET,
-                socket.SO_REUSEADDR,
-                1
-            )
-
-            sock.bind(
-                (host, port)
-            )
-
-            return True
-
-    except OSError:
-        return False
-
-
-def create_instance_state():
-    return {
-        "instance_key": generate_token(),
-        "device_id": generate_device_id(),
-        "created_at": get_iso_timestamp(),
-        "version": APP_VERSION,
-        "application": APP_NAME,
-        "privacy_mode": "consent_required",
-        "gps": False,
-        "fingerprinting": False,
-        "visitor_storage": False,
-        "visitor_history": False
+    instance = {
+        "instance_id": generate_instance_id(),
+        "created_at": now_iso()
     }
 
+    with open(INSTANCE_FILE, "w", encoding="utf-8") as file:
+        json.dump(instance, file, indent=2, ensure_ascii=False)
 
-def load_instance():
-    with STATE_LOCK:
-        state = load_json(
-            INSTANCE_FILE,
-            {}
-        )
-
-        if not state.get("instance_key"):
-            state = create_instance_state()
-            save_json(
-                INSTANCE_FILE,
-                state
-            )
-
-        if not state.get("device_id"):
-            state["device_id"] = generate_device_id()
-
-            save_json(
-                INSTANCE_FILE,
-                state
-            )
-
-        return state
+    return instance
 
 
-INSTANCE = load_instance()
+def initialize_key():
+    ensure_directory()
 
-SECRET_KEY = INSTANCE["instance_key"]
-DEVICE_ID = INSTANCE["device_id"]
+    if os.path.exists(KEY_FILE):
+        try:
+            with open(KEY_FILE, "r", encoding="utf-8") as file:
+                key = file.read().strip()
+
+            if key:
+                return key
+
+        except Exception:
+            pass
+
+    key = generate_key()
+
+    with open(KEY_FILE, "w", encoding="utf-8") as file:
+        file.write(key)
+
+    return key
 
 
-def save_instance():
-    with STATE_LOCK:
-        save_json(
-            INSTANCE_FILE,
-            INSTANCE
-        )
+def initialize_config():
+    ensure_directory()
 
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as file:
+                config = json.load(file)
 
-def write_key():
-    write_text(
-        KEY_FILE,
-        SECRET_KEY
-    )
+            if isinstance(config, dict):
+                return config
 
+        except Exception:
+            pass
 
-def build_config():
-    return {
-        "application": APP_NAME,
-        "version": APP_VERSION,
+    config = {
+        "app_name": APP_NAME,
+        "version": VERSION,
         "host": HOST,
         "port": PORT,
-        "device_id": DEVICE_ID,
-        "created_at": INSTANCE.get("created_at"),
-        "updated_at": get_iso_timestamp(),
-        "privacy": {
-            "consent_required": True,
-            "gps": False,
-            "fingerprinting": False,
-            "visitor_storage": False,
-            "visitor_history": False
-        },
-        "geolocation": {
-            "provider": GEO_PROVIDER,
-            "approximate": True
-        }
+        "history_enabled": True,
+        "consent_required": True,
+        "local_only": True
     }
 
+    with open(CONFIG_FILE, "w", encoding="utf-8") as file:
+        json.dump(config, file, indent=2, ensure_ascii=False)
 
-def save_config():
-    save_json(
-        CONFIG_FILE,
-        build_config()
-    )
+    return config
 
 
-def initialize_files():
-    os.makedirs(
-        PROJECT_FOLDER,
-        exist_ok=True
-    )
+def initialize_history():
+    ensure_directory()
 
-    write_key()
-    save_config()
+    if not os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE, "w", encoding="utf-8") as file:
+            json.dump([], file, ensure_ascii=False)
 
-    log_message(
-        "Configuration initialized"
-    )
-
-    log_message(
-        "Consent mode enabled"
-    )
-
-    log_message(
-        "Visitor storage disabled"
-    )
-
-
-def rotate_key():
-    global SECRET_KEY
-
-    new_key = generate_token()
-
-    with STATE_LOCK:
-        INSTANCE["instance_key"] = new_key
-        INSTANCE["rotated_at"] = get_iso_timestamp()
-
-        SECRET_KEY = new_key
-
-        save_instance()
-
-    write_key()
-    save_config()
-
-    log_message(
-        "Instance key rotated"
-    )
-
-    return new_key
-
-
-def reset_key():
-    print()
-    print(
-        "\033[93mRESET INSTANCE KEY\033[0m"
-    )
-    print(
-        "La chiave precedente verrà invalidata."
-    )
-
-    answer = input(
-        "Scrivi YES per confermare: "
-    ).strip()
-
-    if answer != "YES":
-        print(
-            "\033[90mOperazione annullata.\033[0m"
-        )
-        return
-
-    new_key = rotate_key()
-
-    print(
-        "\033[92m[✓] Nuova chiave:\033[0m"
-    )
-
-    print(new_key)
-
-
-def register_request():
-    with STATE_LOCK:
-        RUNTIME["requests"] += 1
-
-
-def register_consent():
-    with STATE_LOCK:
-        RUNTIME["consented"] += 1
-
-
-def register_success(data):
-    with STATE_LOCK:
-        RUNTIME["successful"] += 1
-        RUNTIME["last_result"] = dict(data)
-
-
-def register_failure():
-    with STATE_LOCK:
-        RUNTIME["failed"] += 1
-
-
-def clear_result():
-    with STATE_LOCK:
-        RUNTIME["last_result"] = None
-
-
-def get_runtime():
-    with STATE_LOCK:
-        return {
-            "requests": RUNTIME["requests"],
-            "consented": RUNTIME["consented"],
-            "successful": RUNTIME["successful"],
-            "failed": RUNTIME["failed"],
-            "uptime": format_uptime(
-                time.time() - START_TIME
-            ),
-            "running": (
-                RUNTIME["started"]
-                and not RUNTIME["stopped"]
-            )
-        }
-
-
-def get_last_result():
-    with STATE_LOCK:
-        value = RUNTIME["last_result"]
-
-        if value is None:
-            return None
-
-        return dict(value)
-
-
-def allow_request():
-    with RATE_LOCK:
-        now = time.monotonic()
-
-        if now - RATE_STATE["started"] >= 1:
-            RATE_STATE["started"] = now
-            RATE_STATE["count"] = 0
-
-        if RATE_STATE["count"] >= 20:
-            return False
-
-        RATE_STATE["count"] += 1
-
-        return True
-
-
-def parse_content_length(handler):
-    raw = handler.headers.get(
-        "Content-Length",
-        "0"
-    )
+        return []
 
     try:
-        value = int(raw)
-    except ValueError:
-        return 0
+        with open(HISTORY_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
 
-    return max(
-        0,
-        value
-    )
+        if isinstance(data, list):
+            return data
 
+    except Exception:
+        pass
 
-def read_body(handler):
-    length = parse_content_length(
-        handler
-    )
+    with open(HISTORY_FILE, "w", encoding="utf-8") as file:
+        json.dump([], file)
 
-    if length > MAX_BODY_SIZE:
-        raise ValueError(
-            "Request body too large"
-        )
-
-    return handler.rfile.read(
-        length
-    )
+    return []
 
 
-def parse_json_body(handler):
-    raw = read_body(
-        handler
-    )
+def load_history():
+    with LOCK:
+        return initialize_history()
 
-    if not raw:
-        return {}
+
+def save_history(history):
+    with LOCK:
+        with open(HISTORY_FILE, "w", encoding="utf-8") as file:
+            json.dump(history, file, indent=2, ensure_ascii=False)
+
+
+def append_history(entry):
+    history = load_history()
+    history.append(entry)
+    save_history(history)
+
+
+def delete_history():
+    save_history([])
+
+
+def reset_instance():
+    ensure_directory()
+
+    instance = {
+        "instance_id": generate_instance_id(),
+        "created_at": now_iso(),
+        "reset_at": now_iso()
+    }
+
+    with open(INSTANCE_FILE, "w", encoding="utf-8") as file:
+        json.dump(instance, file, indent=2, ensure_ascii=False)
+
+    key = generate_key()
+
+    with open(KEY_FILE, "w", encoding="utf-8") as file:
+        file.write(key)
+
+    return instance, key
+
+
+def escape_html(value):
+    if value is None:
+        return ""
+
+    value = str(value)
+
+    replacements = [
+        ("&", "&amp;"),
+        ("<", "&lt;"),
+        (">", "&gt;"),
+        ('"', "&quot;"),
+        ("'", "&#39;")
+    ]
+
+    for source, target in replacements:
+        value = value.replace(source, target)
+
+    return value
+
+
+def format_time(value):
+    if not value:
+        return "—"
 
     try:
-        data = json.loads(
-            raw.decode("utf-8")
-        )
-    except (
-        UnicodeDecodeError,
-        json.JSONDecodeError
-    ):
-        raise ValueError(
-            "Invalid JSON"
-        )
-
-    if not isinstance(data, dict):
-        raise ValueError(
-            "JSON object required"
-        )
-
-    return data
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return dt.astimezone().strftime("%d/%m/%Y %H:%M:%S")
+    except Exception:
+        return value
 
 
-def valid_consent(data):
-    return (
-        data.get("consent") is True
-        and data.get("purpose")
-        == "approximate_ip_geolocation"
-        and data.get("consent_version")
-        == CONSENT_VERSION
-    )
+def format_number(value):
+    if value is None:
+        return "—"
+
+    try:
+        return f"{float(value):.6f}"
+    except Exception:
+        return str(value)
 
 
-def get_requester_ip(handler):
+def is_valid_coordinate(latitude, longitude):
+    try:
+        latitude = float(latitude)
+        longitude = float(longitude)
+    except Exception:
+        return False
+
+    return -90 <= latitude <= 90 and -180 <= longitude <= 180
+
+
+def get_ip_from_request(handler):
     address = handler.client_address
 
     if not address:
         return ""
 
-    return normalize_ip(
-        address[0]
-    )
+    return address[0]
 
 
-def external_get(url):
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent":
-                "PUGILAIN-IP-GRB/3.0"
-        },
-        method="GET"
-    )
+def get_ip_information(ip):
+    if not ip:
+        return {
+            "success": False,
+            "error": "IP non disponibile."
+        }
 
-    with urllib.request.urlopen(
-        request,
-        timeout=GEO_TIMEOUT
-    ) as response:
-        raw = response.read(
-            MAX_BODY_SIZE
+    try:
+        request = Request(
+            "https://ipwho.is/" + ip,
+            headers={
+                "User-Agent": "PugilainLocalGeo/4.0"
+            }
         )
 
-        return json.loads(
-            raw.decode("utf-8")
-        )
+        with urlopen(request, timeout=8) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+
+        data = json.loads(raw)
+
+        if not data.get("success"):
+            return {
+                "success": False,
+                "error": data.get("message", "Informazioni IP non disponibili.")
+            }
+
+        timezone_data = data.get("timezone") or {}
+
+        return {
+            "success": True,
+            "country": data.get("country", ""),
+            "country_code": data.get("country_code", ""),
+            "region": data.get("region", ""),
+            "city": data.get("city", ""),
+            "postal": data.get("postal", ""),
+            "latitude": data.get("latitude"),
+            "longitude": data.get("longitude"),
+            "timezone": timezone_data.get("id", "")
+        }
+
+    except HTTPError:
+        return {
+            "success": False,
+            "error": "Servizio IP non disponibile."
+        }
+
+    except URLError:
+        return {
+            "success": False,
+            "error": "Connessione al servizio IP non riuscita."
+        }
+
+    except Exception as error:
+        return {
+            "success": False,
+            "error": str(error)
+        }
 
 
-def clean_geo_data(data, ip):
-    if not isinstance(data, dict):
-        return None
+def update_state(field):
+    with LOCK:
+        STATE[field] += 1
+        STATE["last_activity"] = now_iso()
 
+
+def statistics():
+    with LOCK:
+        history = load_history()
+
+        return {
+            "requests": STATE["requests"],
+            "accepted": STATE["accepted"],
+            "rejected": STATE["rejected"],
+            "errors": STATE["errors"],
+            "history": len(history),
+            "uptime": int(time.time() - STATE["started"]),
+            "last_activity": STATE["last_activity"]
+        }
+
+
+def make_entry(ip, latitude, longitude, accuracy, ip_info):
     return {
+        "id": uuid.uuid4().hex,
+        "timestamp": now_iso(),
         "ip": ip,
-        "country": safe_text(
-            data.get("country_name")
-        ),
-        "country_code": safe_text(
-            data.get("country_code")
-        ),
-        "region": safe_text(
-            data.get("region")
-        ),
-        "city": safe_text(
-            data.get("city")
-        ),
-        "postal_code": safe_text(
-            data.get("postal")
-        ),
-        "timezone": safe_text(
-            data.get("timezone")
-        ),
-        "latitude": data.get(
-            "latitude"
-        ),
-        "longitude": data.get(
-            "longitude"
-        ),
-        "approximate": True,
-        "provider": GEO_PROVIDER
+        "latitude": float(latitude),
+        "longitude": float(longitude),
+        "accuracy": float(accuracy) if accuracy is not None else None,
+        "country": ip_info.get("country", ""),
+        "country_code": ip_info.get("country_code", ""),
+        "region": ip_info.get("region", ""),
+        "city": ip_info.get("city", ""),
+        "postal": ip_info.get("postal", ""),
+        "timezone": ip_info.get("timezone", "")
     }
 
 
-def get_client_info(ip):
-    return get_ip_location(
-        ip
-    )
+def json_send(handler, payload, status=200):
+    raw = json.dumps(
+        payload,
+        ensure_ascii=False
+    ).encode("utf-8")
+
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Content-Length", str(len(raw)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:5000")
+    handler.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+    handler.send_header("Access-Control-Allow-Headers", "Content-Type")
+    handler.end_headers()
+    handler.wfile.write(raw)
 
 
-def get_ip_location(ip):
-    ip = normalize_ip(ip)
+def html_send(handler, content, status=200):
+    raw = content.encode("utf-8")
 
-    if not ip:
-        register_failure()
+    handler.send_response(status)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Content-Length", str(len(raw)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+    handler.wfile.write(raw)
 
-        return {
-            "success": False,
-            "error": "Invalid IP address"
-        }
 
-    if is_private_ip(ip):
-        return {
-            "success": False,
-            "error": "Private or local address"
-        }
-
-    encoded = urllib.parse.quote(
-        ip,
-        safe=""
-    )
-
-    url = (
-        f"{GEO_PROVIDER}/"
-        f"{encoded}/json/"
-    )
-
+def read_json(handler):
     try:
-        data = external_get(
-            url
-        )
+        length = int(handler.headers.get("Content-Length", "0"))
 
-    except urllib.error.HTTPError as error:
-        register_failure()
+        if length <= 0:
+            return {}
 
-        return {
-            "success": False,
-            "error":
-                f"Provider HTTP {error.code}"
-        }
+        if length > 1024 * 64:
+            return {}
 
-    except urllib.error.URLError:
-        register_failure()
+        body = handler.rfile.read(length).decode("utf-8", errors="replace")
 
-        return {
-            "success": False,
-            "error":
-                "Geolocation provider unavailable"
-        }
-
-    except (
-        TimeoutError,
-        json.JSONDecodeError,
-        UnicodeDecodeError
-    ):
-        register_failure()
-
-        return {
-            "success": False,
-            "error":
-                "Invalid provider response"
-        }
+        return json.loads(body)
 
     except Exception:
-        register_failure()
-
-        return {
-            "success": False,
-            "error":
-                "Geolocation lookup failed"
-        }
-
-    if data.get("error") is True:
-        register_failure()
-
-        return {
-            "success": False,
-            "error": safe_text(
-                data.get("reason"),
-                "Lookup failed"
-            )
-        }
-
-    result = clean_geo_data(
-        data,
-        ip
-    )
-
-    if result is None:
-        register_failure()
-
-        return {
-            "success": False,
-            "error":
-                "No geolocation data"
-        }
-
-    register_success(
-        result
-    )
-
-    return {
-        "success": True,
-        "data": result
-    }
+        return {}
 
 
-def get_additional_geo(lat, lng):
-    try:
-        latitude = float(lat)
-        longitude = float(lng)
-    except (TypeError, ValueError):
-        return None
-
-    if not -90 <= latitude <= 90:
-        return None
-
-    if not -180 <= longitude <= 180:
-        return None
-
-    return {
-        "latitude": latitude,
-        "longitude": longitude,
-        "precision": "approximate"
-    }
-
-
-def make_map_link(latitude, longitude):
-    try:
-        latitude = float(latitude)
-        longitude = float(longitude)
-    except (TypeError, ValueError):
-        return ""
-
-    if not -90 <= latitude <= 90:
-        return ""
-
-    if not -180 <= longitude <= 180:
+def map_link(latitude, longitude):
+    if not is_valid_coordinate(latitude, longitude):
         return ""
 
     return (
         "https://www.openstreetmap.org/"
-        f"?mlat={latitude}"
-        f"&mlon={longitude}"
-        f"&zoom=10"
+        "?mlat=" + str(latitude) +
+        "&mlon=" + str(longitude)
     )
 
 
-def security_headers(handler):
-    handler.send_header(
-        "Cache-Control",
-        "no-store, max-age=0"
-    )
-
-    handler.send_header(
-        "Pragma",
-        "no-cache"
-    )
-
-    handler.send_header(
-        "X-Content-Type-Options",
-        "nosniff"
-    )
-
-    handler.send_header(
-        "X-Frame-Options",
-        "DENY"
-    )
-
-    handler.send_header(
-        "Referrer-Policy",
-        "no-referrer"
-    )
-
-    handler.send_header(
-        "Permissions-Policy",
-        "geolocation=(), camera=(), microphone=()"
-    )
-
-    handler.send_header(
-        "Content-Security-Policy",
-        "default-src 'self'; "
-        "style-src 'self' 'unsafe-inline'; "
-        "script-src 'self' 'unsafe-inline'; "
-        "connect-src 'self'"
-    )
-
-
-def send_json(handler, status, data):
-    body = json.dumps(
-        data,
-        ensure_ascii=False
-    ).encode("utf-8")
-
-    handler.send_response(
-        status
-    )
-
-    handler.send_header(
-        "Content-Type",
-        "application/json; charset=utf-8"
-    )
-
-    handler.send_header(
-        "Content-Length",
-        str(len(body))
-    )
-
-    security_headers(
-        handler
-    )
-
-    handler.end_headers()
-
-    handler.wfile.write(
-        body
-    )
-
-
-def send_html(handler, body, status=200):
-    payload = body.encode(
-        "utf-8"
-    )
-
-    handler.send_response(
-        status
-    )
-
-    handler.send_header(
-        "Content-Type",
-        "text/html; charset=utf-8"
-    )
-
-    handler.send_header(
-        "Content-Length",
-        str(len(payload))
-    )
-
-    security_headers(
-        handler
-    )
-
-    handler.end_headers()
-
-    handler.wfile.write(
-        payload
-    )
-
-
-def public_info():
-    stats = get_runtime()
-
-    return {
-        "application": APP_NAME,
-        "version": APP_VERSION,
-        "status":
-            "online"
-            if stats["running"]
-            else "offline",
-        "privacy": {
-            "consent_required": True,
-            "gps": False,
-            "fingerprinting": False,
-            "visitor_storage": False,
-            "visitor_history": False,
-            "approximate_geolocation": True
-        }
-    }
-
-
-def public_stats():
-    stats = get_runtime()
-
-    return {
-        "status":
-            "online"
-            if stats["running"]
-            else "offline",
-        "requests":
-            stats["requests"],
-        "consented_requests":
-            stats["consented"],
-        "successful_lookups":
-            stats["successful"],
-        "failed_lookups":
-            stats["failed"],
-        "uptime":
-            stats["uptime"]
-    }
-
-
-def admin_info():
-    stats = get_runtime()
-
-    return {
-        "application": APP_NAME,
-        "version": APP_VERSION,
-        "device_id": DEVICE_ID,
-        "hostname": get_hostname(),
-        "python": platform.python_version(),
-        "platform": platform.platform(),
-        "machine": platform.machine(),
-        "processor": platform.processor(),
-        "host": HOST,
-        "port": PORT,
-        "local_url": get_server_url(),
-        "lan_url": get_lan_url(),
-        "uptime": stats["uptime"],
-        "requests": stats["requests"],
-        "consented": stats["consented"],
-        "successful": stats["successful"],
-        "failed": stats["failed"],
-        "gps": False,
-        "fingerprinting": False,
-        "visitor_storage": False
-    }
-
-
-def render_result(data):
-    if not data:
+def render_history_rows(history):
+    if not history:
         return """
         <div class="empty">
-            <div class="empty-icon">◎</div>
-            <div>Nessun risultato disponibile.</div>
+            <div class="empty-symbol">◎</div>
+            <div class="empty-title">Nessun dato nello storico</div>
+            <div class="empty-text">Le richieste autorizzate appariranno qui.</div>
         </div>
         """
 
-    if not data.get("success"):
-        return f"""
-        <div class="result error">
-            <div class="eyebrow">ERRORE</div>
-            <h2>{html_text(data.get("error"))}</h2>
-        </div>
-        """
+    rows = []
 
-    geo = data.get(
-        "data",
-        {}
-    )
+    for item in reversed(history):
+        map_url = map_link(
+            item.get("latitude"),
+            item.get("longitude")
+        )
 
-    rows = [
-        ("IP", geo.get("ip")),
-        ("Paese", geo.get("country")),
-        ("Codice", geo.get("country_code")),
-        ("Regione", geo.get("region")),
-        ("Città", geo.get("city")),
-        ("CAP", geo.get("postal_code")),
-        ("Fuso orario", geo.get("timezone")),
-        ("Latitudine", geo.get("latitude")),
-        ("Longitudine", geo.get("longitude")),
-        ("Precisione", "Approssimativa")
-    ]
+        map_button = ""
 
-    cells = []
+        if map_url:
+            map_button = (
+                '<a class="small-button" href="' +
+                escape_html(map_url) +
+                '" target="_blank" rel="noreferrer">MAPPA</a>'
+            )
 
-    for label, value in rows:
-        cells.append(
+        rows.append(
             f"""
-            <div class="data-row">
-                <span>{html_text(label)}</span>
-                <strong>{html_text(value)}</strong>
+            <div class="history-item">
+                <div class="history-main">
+                    <div class="history-date">
+                        {escape_html(format_time(item.get("timestamp")))}
+                    </div>
+
+                    <div class="history-ip">
+                        {escape_html(item.get("ip", "—"))}
+                    </div>
+
+                    <div class="history-location">
+                        {escape_html(item.get("city") or "Posizione GPS")}
+                        <span>•</span>
+                        {escape_html(item.get("country") or "—")}
+                    </div>
+                </div>
+
+                <div class="history-coordinates">
+                    <div>
+                        <span>LAT</span>
+                        <strong>{escape_html(format_number(item.get("latitude")))}</strong>
+                    </div>
+
+                    <div>
+                        <span>LON</span>
+                        <strong>{escape_html(format_number(item.get("longitude")))}</strong>
+                    </div>
+
+                    <div>
+                        <span>ACC</span>
+                        <strong>{escape_html(item.get("accuracy") or "—")} m</strong>
+                    </div>
+
+                    {map_button}
+                </div>
             </div>
             """
         )
 
-    map_link = make_map_link(
-        geo.get("latitude"),
-        geo.get("longitude")
-    )
+    return "".join(rows)
 
-    map_button = ""
 
-    if map_link:
-        map_button = (
-            '<a class="map-button" '
-            f'href="{html.escape(map_link, quote=True)}" '
-            'target="_blank" '
-            'rel="noreferrer">Apri mappa</a>'
-        )
-
-    return f"""
-    <div class="result">
-        <div class="result-head">
-            <div>
-                <div class="eyebrow">RISULTATO</div>
-                <h2>Geolocalizzazione IP</h2>
-            </div>
-            <div class="pill">CONSENSO</div>
-        </div>
-        <div class="grid">
-            {''.join(cells)}
-        </div>
-        {map_button}
-        <div class="notice">
-            Il risultato è temporaneo e non viene salvato nello storico.
-        </div>
-    </div>
-    """
-
-
-def dashboard_html():
-    return DASHBOARD_HTML.replace(
-        "{{APP_NAME}}",
-        html_text(APP_NAME)
-    ).replace(
-        "{{VERSION}}",
-        html_text(APP_VERSION)
-    )
-
-
-class Handler(BaseHTTPRequestHandler):
-
-    server_version = "PUGILAIN/3.0"
-
-    def do_GET(self):
-        register_request()
-
-        if not allow_request():
-            send_json(
-                self,
-                429,
-                {
-                    "success": False,
-                    "error": "Rate limit"
-                }
-            )
-            return
-
-        path = urllib.parse.urlparse(
-            self.path
-        ).path
-
-        if path in (
-            "/",
-            "/dashboard"
-        ):
-            send_html(
-                self,
-                dashboard_html()
-            )
-            return
-
-        if path == "/health":
-            send_json(
-                self,
-                200,
-                {
-                    "success": True,
-                    "status": "online",
-                    "uptime":
-                        get_runtime()["uptime"]
-                }
-            )
-            return
-
-        if path == "/api/info":
-            send_json(
-                self,
-                200,
-                public_info()
-            )
-            return
-
-        if path == "/api/stats":
-            send_json(
-                self,
-                200,
-                public_stats()
-            )
-            return
-
-        if path == "/api/result":
-            send_json(
-                self,
-                200,
-                {
-                    "success": True,
-                    "data": get_last_result(),
-                    "persistent": False
-                }
-            )
-            return
-
-        if path == "/api/admin":
-            send_json(
-                self,
-                200,
-                admin_info()
-            )
-            return
-
-        send_json(
-            self,
-            404,
-            {
-                "success": False,
-                "error": "Not found"
-            }
-        )
-
-    def do_POST(self):
-        register_request()
-
-        if not allow_request():
-            send_json(
-                self,
-                429,
-                {
-                    "success": False,
-                    "error": "Rate limit"
-                }
-            )
-            return
-
-        path = urllib.parse.urlparse(
-            self.path
-        ).path
-
-        if path != "/api/location":
-            send_json(
-                self,
-                404,
-                {
-                    "success": False,
-                    "error": "Not found"
-                }
-            )
-            return
-
-        try:
-            data = parse_json_body(
-                self
-            )
-        except ValueError as error:
-            send_json(
-                self,
-                400,
-                {
-                    "success": False,
-                    "error": str(error)
-                }
-            )
-            return
-
-        if not valid_consent(data):
-            send_json(
-                self,
-                403,
-                {
-                    "success": False,
-                    "error":
-                        "Explicit consent required",
-                    "required": {
-                        "consent": True,
-                        "purpose":
-                            "approximate_ip_geolocation",
-                        "consent_version":
-                            CONSENT_VERSION
-                    }
-                }
-            )
-            return
-
-        register_consent()
-
-        requester_ip = get_requester_ip(
-            self
-        )
-
-        if not requester_ip:
-            send_json(
-                self,
-                400,
-                {
-                    "success": False,
-                    "error":
-                        "Unable to determine requester address"
-                }
-            )
-            return
-
-        result = get_ip_location(
-            requester_ip
-        )
-
-        payload = {
-            "success":
-                result.get(
-                    "success",
-                    False
-                ),
-            "data":
-                result.get("data"),
-            "error":
-                result.get("error"),
-            "stored": False,
-            "gps": False,
-            "fingerprinting": False,
-            "approximate": True
-        }
-
-        print_result(
-            result
-        )
-
-        status = (
-            200
-            if result.get("success")
-            else 502
-        )
-
-        send_json(
-            self,
-            status,
-            payload
-        )
-
-    def do_OPTIONS(self):
-        self.send_response(
-            204
-        )
-
-        security_headers(
-            self
-        )
-
-        self.send_header(
-            "Access-Control-Allow-Methods",
-            "GET, POST, OPTIONS"
-        )
-
-        self.send_header(
-            "Access-Control-Allow-Headers",
-            "Content-Type"
-        )
-
-        self.send_header(
-            "Access-Control-Max-Age",
-            "600"
-        )
-
-        self.end_headers()
-
-    def log_message(self, format_string, *args):
-        return
-
-
-def print_result(result):
-    print()
-
-    print(
-        "\033[92m"
-        + "╔"
-        + "═" * 76
-        + "╗"
-        + "\033[0m"
-    )
-
-    print(
-        "\033[92m║"
-        + " " * 20
-        + "CONSENTED REQUEST"
-        + " " * 39
-        + "║"
-        + "\033[0m"
-    )
-
-    print(
-        "\033[92m"
-        + "╚"
-        + "═" * 76
-        + "╝"
-        + "\033[0m"
-    )
-
-    if result.get("success"):
-        data = result.get(
-            "data",
-            {}
-        )
-
-        print(
-            f"\033[96mCountry:\033[0m "
-            f"{safe_text(data.get('country'))}"
-        )
-
-        print(
-            f"\033[96mRegion:\033[0m "
-            f"{safe_text(data.get('region'))}"
-        )
-
-        print(
-            f"\033[96mCity:\033[0m "
-            f"{safe_text(data.get('city'))}"
-        )
-
-        print(
-            f"\033[96mTimezone:\033[0m "
-            f"{safe_text(data.get('timezone'))}"
-        )
-
-        print(
-            f"\033[96mLatitude:\033[0m "
-            f"{safe_text(data.get('latitude'))}"
-        )
-
-        print(
-            f"\033[96mLongitude:\033[0m "
-            f"{safe_text(data.get('longitude'))}"
-        )
-
-        print(
-            "\033[90m"
-            "Requester IP non salvato su disco."
-            "\033[0m"
-        )
-
-    else:
-        print(
-            f"\033[91mLookup failed:\033[0m "
-            f"{safe_text(result.get('error'))}"
-        )
-
-    print()
-
-
-def self_test():
-    results = []
-
-    results.append(
-        (
-            "IPv4 validation",
-            validate_ip("127.0.0.1")
-        )
-    )
-
-    results.append(
-        (
-            "IPv6 validation",
-            validate_ip("::1")
-        )
-    )
-
-    results.append(
-        (
-            "Invalid IP rejection",
-            not validate_ip(
-                "999.999.999.999"
-            )
-        )
-    )
-
-    results.append(
-        (
-            "Private IP detection",
-            is_private_ip(
-                "127.0.0.1"
-            )
-        )
-    )
-
-    token = generate_token()
-
-    results.append(
-        (
-            "Token generation",
-            len(token) > 30
-        )
-    )
-
-    sample = {
-        "status": "ok",
-        "value": 42
-    }
-
-    encoded = encode_base64(
-        sample
-    )
-
-    results.append(
-        (
-            "Base64 roundtrip",
-            decode_base64(encoded)
-            == sample
-        )
-    )
-
-    results.append(
-        (
-            "Project directory",
-            os.path.isdir(
-                PROJECT_FOLDER
-            )
-        )
-    )
-
-    results.append(
-        (
-            "Config file",
-            os.path.isfile(
-                CONFIG_FILE
-            )
-        )
-    )
-
-    results.append(
-        (
-            "Key file",
-            os.path.isfile(
-                KEY_FILE
-            )
-        )
-    )
-
-    return results
-
-
-def run_self_test():
-    print()
-    print(
-        "\033[96m"
-        + "═" * 78
-        + "\033[0m"
-    )
-
-    print(
-        "\033[97mSELF TEST\033[0m"
-    )
-
-    print(
-        "\033[96m"
-        + "═" * 78
-        + "\033[0m"
-    )
-
-    results = self_test()
-
-    passed = 0
-
-    for name, status in results:
-        if status:
-            marker = (
-                "\033[92mPASS\033[0m"
-            )
-            passed += 1
-        else:
-            marker = (
-                "\033[91mFAIL\033[0m"
-            )
-
-        print(
-            f"{marker}  {name}"
-        )
-
-    print()
-
-    print(
-        f"Result: "
-        f"{passed}/{len(results)}"
-    )
-
-
-def print_privacy():
-    print()
-    print(
-        "\033[96m"
-        + "═" * 78
-        + "\033[0m"
-    )
-
-    print(
-        "\033[97mPRIVACY MODEL\033[0m"
-    )
-
-    print(
-        "\033[96m"
-        + "═" * 78
-        + "\033[0m"
-    )
-
-    lines = [
-        "Consenso esplicito richiesto.",
-        "Geolocalizzazione tramite IP approssimativa.",
-        "GPS del browser disabilitato.",
-        "Fingerprinting disabilitato.",
-        "User-Agent del visitatore non analizzato.",
-        "IP del visitatore non scritto su disco.",
-        "Nessuno storico visite persistente.",
-        "Risultato corrente conservato solo temporaneamente.",
-        "Server locale per impostazione predefinita."
-    ]
-
-    for line in lines:
-        print(
-            f"\033[97m•\033[0m {line}"
-        )
-
-
-def print_section(title):
-    print()
-    print(
-        "\033[96m"
-        + "═" * 78
-        + "\033[0m"
-    )
-
-    print(
-        f"\033[97m{title}\033[0m"
-    )
-
-    print(
-        "\033[96m"
-        + "═" * 78
-        + "\033[0m"
-    )
-
-
-def print_summary():
-    print_section(
-        "SYSTEM READY"
-    )
-
-    values = [
-        (
-            "Project",
-            PROJECT_FOLDER
-        ),
-        (
-            "Key",
-            KEY_FILE
-        ),
-        (
-            "Config",
-            CONFIG_FILE
-        ),
-        (
-            "Log",
-            LOG_FILE
-        ),
-        (
-            "Dashboard",
-            get_server_url()
-        ),
-        (
-            "LAN",
-            get_lan_url()
-        ),
-        (
-            "Host",
-            HOST
-        ),
-        (
-            "Port",
-            PORT
-        ),
-        (
-            "Version",
-            APP_VERSION
-        )
-    ]
-
-    for label, value in values:
-        print(
-            f"\033[97m{label:<12}\033[0m "
-            f"{value}"
-        )
-
-
-def show_key():
-    print_section(
-        "INSTANCE KEY"
-    )
-
-    print(
-        "\033[96m"
-        + SECRET_KEY
-        + "\033[0m"
-    )
-
-    print()
-    print(
-        "La chiave resta invariata "
-        "tra gli avvii."
-    )
-
-
-def show_config():
-    print_section(
-        "CONFIGURATION"
-    )
-
-    print(
-        json.dumps(
-            build_config(),
-            ensure_ascii=False,
-            indent=4
-        )
-    )
-
-
-def show_diagnostics():
-    print_section(
-        "DIAGNOSTICS"
-    )
-
-    diagnostics = [
-        (
-            "Python",
-            platform.python_version()
-        ),
-        (
-            "Platform",
-            platform.platform()
-        ),
-        (
-            "Machine",
-            platform.machine()
-        ),
-        (
-            "Processor",
-            platform.processor()
-            or "Unknown"
-        ),
-        (
-            "Hostname",
-            get_hostname()
-        ),
-        (
-            "Local IP",
-            get_local_ip()
-        ),
-        (
-            "Project",
-            PROJECT_FOLDER
-        ),
-        (
-            "Port available",
-            port_available(
-                HOST,
-                PORT
-            )
-        ),
-        (
-            "Server URL",
-            get_server_url()
-        )
-    ]
-
-    for label, value in diagnostics:
-        print(
-            f"\033[97m"
-            f"{label:<18}"
-            f"\033[0m {value}"
-        )
-
-
-def show_runtime():
-    print_section(
-        "RUNTIME"
-    )
-
-    stats = get_runtime()
-
-    values = [
-        (
-            "Requests",
-            stats["requests"]
-        ),
-        (
-            "Consent",
-            stats["consented"]
-        ),
-        (
-            "Success",
-            stats["successful"]
-        ),
-        (
-            "Failed",
-            stats["failed"]
-        ),
-        (
-            "Uptime",
-            stats["uptime"]
-        ),
-        (
-            "Running",
-            stats["running"]
-        )
-    ]
-
-    for label, value in values:
-        print(
-            f"\033[97m"
-            f"{label:<18}"
-            f"\033[0m {value}"
-        )
-
-
-def server_running():
-    with SERVER_LOCK:
-        return (
-            SERVER is not None
-            and RUNTIME["started"]
-            and not RUNTIME["stopped"]
-        )
-
-
-def serve():
-    try:
-        SERVER.serve_forever(
-            poll_interval=0.25
-        )
-    except Exception as error:
-        log_message(
-            f"Server loop error: {error}"
-        )
-
-
-def start_server():
-    global SERVER
-    global SERVER_THREAD
-
-    with SERVER_LOCK:
-        if server_running():
-            print(
-                "\033[93mServer già attivo.\033[0m"
-            )
-            return False
-
-        if not port_available(
-            HOST,
-            PORT
-        ):
-            print(
-                f"\033[91mPorta {PORT} non disponibile.\033[0m"
-            )
-            return False
-
-        try:
-            SERVER = ThreadingHTTPServer(
-                (
-                    HOST,
-                    PORT
-                ),
-                Handler
-            )
-
-            SERVER.daemon_threads = True
-
-            RUNTIME["started"] = True
-            RUNTIME["stopped"] = False
-
-            SERVER_THREAD = threading.Thread(
-                target=serve,
-                name="PUGILAIN-HTTP",
-                daemon=True
-            )
-
-            SERVER_THREAD.start()
-
-        except OSError as error:
-            SERVER = None
-
-            print(
-                f"\033[91mErrore server: "
-                f"{error}\033[0m"
-            )
-
-            return False
-
-    log_message(
-        f"Server started on "
-        f"{get_server_url()}"
-    )
-
-    return True
-
-
-def stop_server():
-    global SERVER
-
-    with SERVER_LOCK:
-        current = SERVER
-        SERVER = None
-
-        RUNTIME["stopped"] = True
-
-    if current is None:
-        return
-
-    try:
-        current.shutdown()
-    except Exception:
-        pass
-
-    try:
-        current.server_close()
-    except Exception:
-        pass
-
-    log_message(
-        "Server stopped"
-    )
-
-
-def restart_server():
-    stop_server()
-
-    time.sleep(
-        0.4
-    )
-
-    return start_server()
-
-
-def open_dashboard():
-    if not server_running():
-        print(
-            "\033[93m"
-            "Server non attivo."
-            "\033[0m"
-        )
-        return
-
-    try:
-        webbrowser.open(
-            get_server_url(),
-            new=2
-        )
-    except Exception:
-        print(
-            get_server_url()
-        )
-
-
-def menu():
-    print_section(
-        "MAIN MENU"
-    )
-
-    print(
-        "\033[97m[1]\033[0m "
-        "Avvia server"
-    )
-
-    print(
-        "\033[97m[2]\033[0m "
-        "Ferma server"
-    )
-
-    print(
-        "\033[97m[3]\033[0m "
-        "Riavvia server"
-    )
-
-    print(
-        "\033[97m[4]\033[0m "
-        "Apri dashboard"
-    )
-
-    print(
-        "\033[97m[5]\033[0m "
-        "Mostra chiave"
-    )
-
-    print(
-        "\033[97m[6]\033[0m "
-        "Reset chiave"
-    )
-
-    print(
-        "\033[97m[7]\033[0m "
-        "Configurazione"
-    )
-
-    print(
-        "\033[97m[8]\033[0m "
-        "Diagnostica"
-    )
-
-    print(
-        "\033[97m[9]\033[0m "
-        "Runtime"
-    )
-
-    print(
-        "\033[97m[10]\033[0m "
-        "Cancella risultato"
-    )
-
-    print(
-        "\033[97m[11]\033[0m "
-        "Self test"
-    )
-
-    print(
-        "\033[97m[0]\033[0m "
-        "Esci"
-    )
-
-    return input(
-        "\n\033[96mPUGILAIN > \033[0m"
-    ).strip()
-
-
-def menu_loop():
-    while True:
-        choice = menu()
-
-        if choice == "1":
-            if start_server():
-                print(
-                    "\033[92m"
-                    "[✓] Server avviato"
-                    "\033[0m"
-                )
-                open_dashboard()
-
-        elif choice == "2":
-            stop_server()
-
-            print(
-                "\033[92m"
-                "[✓] Server fermato"
-                "\033[0m"
-            )
-
-        elif choice == "3":
-            if restart_server():
-                print(
-                    "\033[92m"
-                    "[✓] Server riavviato"
-                    "\033[0m"
-                )
-
-        elif choice == "4":
-            open_dashboard()
-
-        elif choice == "5":
-            show_key()
-
-        elif choice == "6":
-            reset_key()
-
-        elif choice == "7":
-            show_config()
-
-        elif choice == "8":
-            show_diagnostics()
-
-        elif choice == "9":
-            show_runtime()
-
-        elif choice == "10":
-            clear_result()
-
-            print(
-                "\033[92m"
-                "[✓] Risultato cancellato"
-                "\033[0m"
-            )
-
-        elif choice == "11":
-            run_self_test()
-
-        elif choice == "0":
-            break
-
-        else:
-            print(
-                "\033[91m"
-                "Scelta non valida."
-                "\033[0m"
-            )
-
-
-def shutdown():
-    stop_server()
-
-    log_message(
-        "Application shutdown"
-    )
-
-
-def initialize():
-    initialize_files()
-
-    log_message(
-        f"{APP_NAME} {APP_VERSION}"
-    )
-
-    log_message(
-        f"Device ID: {DEVICE_ID}"
-    )
-
-
-def startup():
-    clear()
-
-    print(
-        "\033[92m"
-        + BANNER
-        + "\033[0m"
-    )
-
-    time.sleep(
-        0.5
-    )
-
-    loading_animation(
-        0.7,
-        "Initializing core modules..."
-    )
-
-    print(
-        "\033[92m"
-        "[✓] Core modules initialized"
-        "\033[0m"
-    )
-
-    loading_animation(
-        0.7,
-        "Loading persistent instance..."
-    )
-
-    print(
-        "\033[92m"
-        "[✓] Instance loaded"
-        "\033[0m"
-    )
-
-    loading_animation(
-        0.7,
-        "Preparing environment..."
-    )
-
-    initialize()
-
-    print(
-        "\033[92m"
-        "[✓] Environment ready"
-        "\033[0m"
-    )
-
-    loading_animation(
-        0.7,
-        "Running diagnostics..."
-    )
-
-    run_self_test()
-
-    print(
-        f"\033[97m"
-        f"Device ID: "
-        f"{DEVICE_ID}"
-        f"\033[0m"
-    )
-
-    print(
-        f"\033[97m"
-        f"Key preview: "
-        f"{SECRET_KEY[:16]}..."
-        f"\033[0m"
-    )
-
-    print_privacy()
-
-    print_summary()
-
-    if start_server():
-        print(
-            "\033[92m"
-            "[✓] Local server started"
-            "\033[0m"
-        )
-
-        open_dashboard()
-
-    else:
-        print(
-            "\033[91m"
-            "[!] Server not started"
-            "\033[0m"
-        )
-
-
-DASHBOARD_HTML = r"""
+def render_dashboard():
+    return """
 <!DOCTYPE html>
 <html lang="it">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<meta name="robots" content="noindex,nofollow">
-<title>{{APP_NAME}} · {{VERSION}}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PUGILAIN LOCAL GEO</title>
 <style>
-
 * {
     box-sizing: border-box;
 }
@@ -2323,860 +551,876 @@ html {
 body {
     margin: 0;
     min-height: 100vh;
-    background: rgb(6, 8, 11);
-    color: rgb(238, 242, 247);
-    font-family: Inter, Segoe UI, Arial, sans-serif;
+    color: #f7f8ff;
+    background:
+        radial-gradient(circle at 15% 10%, rgba(104,91,255,.16), transparent 30%),
+        radial-gradient(circle at 85% 20%, rgba(40,205,255,.11), transparent 28%),
+        #070a10;
+    font-family: Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
 }
 
-.page {
-    width: min(980px, calc(100% - 30px));
-    margin: 0 auto;
-    padding: 28px 0 70px;
+body:before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    opacity: .5;
+    background-image:
+        linear-gradient(rgba(255,255,255,.018) 1px,transparent 1px),
+        linear-gradient(90deg,rgba(255,255,255,.018) 1px,transparent 1px);
+    background-size: 36px 36px;
 }
 
-.topbar {
+.container {
+    width: min(1200px,calc(100% - 32px));
+    margin: auto;
+}
+
+nav {
+    height: 84px;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 20px;
-    padding: 17px 20px;
-    border: 1px solid rgb(37, 44, 53);
-    border-radius: 18px;
-    background: rgb(12, 15, 20);
-}
-
-.brand {
-    display: flex;
-    align-items: center;
-    gap: 13px;
+    border-bottom: 1px solid rgba(255,255,255,.07);
 }
 
 .logo {
-    width: 44px;
-    height: 44px;
+    display: flex;
+    align-items: center;
+    gap: 13px;
+    font-weight: 900;
+    letter-spacing: 3px;
+}
+
+.logo-mark {
+    width: 42px;
+    height: 42px;
+    border-radius: 13px;
     display: grid;
     place-items: center;
-    border-radius: 13px;
-    background: rgb(235, 239, 244);
-    color: rgb(5, 7, 9);
-    font-weight: 900;
-    font-size: 20px;
+    background: linear-gradient(135deg,#765cff,#26d5ef);
+    box-shadow: 0 0 35px rgba(93,92,255,.3);
 }
 
-.brand-title {
-    font-size: 16px;
-    font-weight: 900;
-    letter-spacing: .12em;
+.nav-info {
+    display: flex;
+    gap: 9px;
 }
 
-.brand-subtitle {
-    margin-top: 4px;
-    color: rgb(122, 134, 149);
-    font-size: 11px;
-}
-
-.status {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    border: 1px solid rgb(36, 83, 56);
-    background: rgb(10, 28, 18);
-    color: rgb(131, 235, 167);
+.badge {
+    padding: 9px 13px;
     border-radius: 999px;
-    padding: 8px 12px;
+    border: 1px solid rgba(255,255,255,.08);
+    background: rgba(255,255,255,.035);
+    color: #929cb5;
     font-size: 10px;
-    font-weight: 900;
+    font-weight: 800;
+    letter-spacing: 1.4px;
 }
 
-.status-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: rgb(82, 220, 125);
+.online {
+    color: #a9f8c3;
+    border-color: rgba(95,235,140,.2);
+}
+
+main {
+    padding: 68px 0 90px;
 }
 
 .hero {
-    padding: 70px 0 35px;
+    max-width: 850px;
+    margin-bottom: 38px;
 }
 
-.eyebrow {
-    color: rgb(105, 224, 150);
-    font-size: 10px;
+.kicker {
+    color: #8f8cff;
+    font-size: 11px;
+    letter-spacing: 4px;
     font-weight: 900;
-    letter-spacing: .2em;
+    margin-bottom: 17px;
 }
 
 h1 {
-    margin: 13px 0 17px;
-    max-width: 820px;
-    font-size: clamp(38px, 8vw, 72px);
-    line-height: .97;
-    letter-spacing: -.06em;
+    margin: 0;
+    font-size: clamp(44px,7vw,82px);
+    line-height: .94;
+    letter-spacing: -4px;
 }
 
-.hero-text {
-    max-width: 720px;
-    color: rgb(153, 165, 179);
-    font-size: 16px;
-    line-height: 1.75;
+.gradient {
+    background: linear-gradient(90deg,#fff,#a6a4ff,#65e5ff);
+    background-clip: text;
+    -webkit-background-clip: text;
+    color: transparent;
+}
+
+.subtitle {
+    color: #858fa8;
+    line-height: 1.7;
+    font-size: 17px;
+    max-width: 700px;
+    margin-top: 24px;
 }
 
 .panel {
-    padding: 28px;
-    border: 1px solid rgb(37, 44, 53);
-    border-radius: 22px;
-    background: rgb(12, 15, 20);
-    box-shadow: 0 30px 90px rgba(0,0,0,.28);
+    padding: 27px;
+    border-radius: 27px;
+    border: 1px solid rgba(255,255,255,.08);
+    background: rgba(14,18,28,.78);
+    box-shadow: 0 30px 100px rgba(0,0,0,.35);
+    backdrop-filter: blur(20px);
+}
+
+.panel-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 20px;
+    align-items: center;
+    margin-bottom: 22px;
 }
 
 .panel-title {
-    font-size: 21px;
     font-weight: 900;
+    font-size: 18px;
 }
 
-.panel-subtitle {
-    margin: 8px 0 23px;
-    color: rgb(135, 147, 161);
-    line-height: 1.65;
-}
-
-.consent {
-    display: flex;
-    align-items: flex-start;
-    gap: 13px;
-    padding: 17px;
-    border: 1px solid rgb(43, 51, 61);
-    border-radius: 15px;
-    background: rgb(16, 20, 26);
-}
-
-.consent input {
-    width: 20px;
-    height: 20px;
-    margin-top: 2px;
-    accent-color: rgb(228, 233, 239);
-}
-
-.consent-text {
-    color: rgb(190, 199, 210);
-    font-size: 13px;
-    line-height: 1.65;
-}
-
-.consent-text strong {
-    color: rgb(241, 244, 248);
-}
-
-.actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    margin-top: 17px;
-}
-
-button {
-    border: 0;
-    border-radius: 12px;
-    padding: 13px 18px;
-    font-size: 13px;
-    font-weight: 900;
-    cursor: pointer;
-    transition: transform .16s ease, opacity .16s ease;
-}
-
-button:hover {
-    transform: translateY(-1px);
-}
-
-button:disabled {
-    opacity: .4;
-    cursor: not-allowed;
-    transform: none;
-}
-
-.primary {
-    background: rgb(235, 239, 244);
-    color: rgb(6, 8, 11);
-}
-
-.secondary {
-    background: rgb(29, 35, 43);
-    color: rgb(222, 228, 235);
-}
-
-.result-wrap {
-    margin-top: 20px;
-}
-
-.result {
-    padding: 21px;
-    border: 1px solid rgb(42, 52, 63);
-    border-radius: 17px;
-    background: rgb(9, 13, 18);
-}
-
-.result.error {
-    border-color: rgb(92, 43, 49);
-}
-
-.result-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 15px;
-    margin-bottom: 20px;
-}
-
-.result h2 {
-    margin: 6px 0 0;
-    font-size: 24px;
-}
-
-.pill {
-    padding: 7px 10px;
-    border-radius: 999px;
-    border: 1px solid rgb(42, 86, 59);
-    color: rgb(131, 235, 167);
-    background: rgb(11, 29, 19);
-    font-size: 9px;
-    font-weight: 900;
-}
-
-.grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px;
-}
-
-.data-row {
-    padding: 13px;
-    border: 1px solid rgb(31, 39, 48);
-    border-radius: 12px;
-    background: rgb(15, 19, 25);
-}
-
-.data-row span {
-    display: block;
-    margin-bottom: 6px;
-    color: rgb(118, 130, 145);
-    font-size: 9px;
-    font-weight: 800;
-    letter-spacing: .1em;
-    text-transform: uppercase;
-}
-
-.data-row strong {
-    display: block;
-    color: rgb(232, 237, 242);
-    font-size: 14px;
-    word-break: break-word;
-}
-
-.map-button {
-    display: inline-block;
-    margin-top: 17px;
-    padding: 12px 16px;
-    border-radius: 11px;
-    background: rgb(222, 227, 234);
-    color: rgb(6, 8, 11);
-    text-decoration: none;
+.panel-description {
+    color: #68738b;
     font-size: 12px;
-    font-weight: 900;
+    margin-top: 5px;
 }
 
-.notice {
-    margin-top: 16px;
-    padding: 13px;
-    border-radius: 11px;
-    background: rgb(17, 22, 29);
-    color: rgb(127, 140, 154);
-    font-size: 11px;
-    line-height: 1.65;
+.consent-box {
+    padding: 20px;
+    border-radius: 18px;
+    border: 1px solid rgba(255,255,255,.07);
+    background: rgba(0,0,0,.18);
+    line-height: 1.7;
+    color: #8791a8;
+    font-size: 13px;
 }
 
-.empty {
-    padding: 35px;
-    border: 1px dashed rgb(43, 51, 61);
-    border-radius: 17px;
-    color: rgb(124, 137, 151);
-    text-align: center;
+.consent-title {
+    color: #f2f4ff;
+    font-weight: 800;
+    margin-bottom: 7px;
 }
 
-.empty-icon {
-    margin-bottom: 9px;
-    font-size: 29px;
-}
-
-.cards {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+.consent-actions {
+    display: flex;
     gap: 11px;
     margin-top: 20px;
 }
 
-.card {
-    padding: 18px;
-    border: 1px solid rgb(36, 43, 52);
-    border-radius: 16px;
-    background: rgb(12, 15, 20);
+button {
+    border: 0;
+    cursor: pointer;
+    color: white;
+    padding: 14px 20px;
+    border-radius: 14px;
+    font-weight: 900;
+    letter-spacing: 1px;
+    background: linear-gradient(135deg,#765cff,#28cbea);
+    box-shadow: 0 14px 35px rgba(72,80,255,.2);
 }
 
-.card strong {
+button.secondary {
+    background: rgba(255,255,255,.05);
+    border: 1px solid rgba(255,255,255,.08);
+    box-shadow: none;
+}
+
+button.danger {
+    background: rgba(255,70,100,.1);
+    border: 1px solid rgba(255,70,100,.2);
+    box-shadow: none;
+}
+
+.status-box {
+    margin-top: 18px;
+    display: none;
+    padding: 15px;
+    border-radius: 15px;
+    background: rgba(255,255,255,.035);
+    color: #9ca6bc;
+    font-size: 12px;
+}
+
+.status-box.visible {
     display: block;
-    margin-bottom: 6px;
-    font-size: 16px;
 }
 
-.card span {
-    color: rgb(126, 139, 153);
-    font-size: 11px;
-    line-height: 1.55;
+.stats {
+    margin-top: 18px;
+    display: grid;
+    grid-template-columns: repeat(5,1fr);
+    gap: 11px;
 }
 
-.footer {
-    padding-top: 25px;
-    color: rgb(84, 97, 112);
+.stat {
+    border-radius: 19px;
+    border: 1px solid rgba(255,255,255,.07);
+    background: rgba(255,255,255,.025);
+    padding: 18px;
+}
+
+.stat-label {
+    color: #69748d;
+    font-size: 9px;
+    font-weight: 900;
+    letter-spacing: 2px;
+}
+
+.stat-value {
+    margin-top: 9px;
+    font-size: 25px;
+    font-weight: 900;
+}
+
+.history-panel {
+    margin-top: 18px;
+}
+
+.history-tools {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.search {
+    min-width: 230px;
+    flex: 1;
+    border: 1px solid rgba(255,255,255,.08);
+    background: rgba(0,0,0,.2);
+    color: white;
+    padding: 13px 15px;
+    border-radius: 13px;
+    outline: none;
+}
+
+.history-list {
+    margin-top: 20px;
+}
+
+.history-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 20px;
+    padding: 18px 0;
+    border-bottom: 1px solid rgba(255,255,255,.055);
+}
+
+.history-item:last-child {
+    border-bottom: 0;
+}
+
+.history-date {
+    color: #68738d;
     font-size: 10px;
-    line-height: 1.7;
-    text-align: center;
+    letter-spacing: 1px;
 }
 
-.loading {
+.history-ip {
+    margin-top: 7px;
+    font-size: 17px;
+    font-weight: 900;
+}
+
+.history-location {
+    margin-top: 6px;
+    color: #7e89a2;
+    font-size: 12px;
+}
+
+.history-location span {
+    padding: 0 6px;
+    color: #515c74;
+}
+
+.history-coordinates {
+    display: flex;
+    gap: 9px;
+    align-items: center;
+}
+
+.history-coordinates > div {
+    min-width: 88px;
+    padding: 9px 11px;
+    border-radius: 11px;
+    background: rgba(255,255,255,.025);
+}
+
+.history-coordinates span {
+    display: block;
+    color: #59647b;
+    font-size: 8px;
+    letter-spacing: 1px;
+    font-weight: 900;
+}
+
+.history-coordinates strong {
+    display: block;
+    margin-top: 4px;
+    font-size: 10px;
+}
+
+.small-button {
     display: inline-flex;
     align-items: center;
-    gap: 8px;
+    text-decoration: none;
+    color: white;
+    padding: 10px 12px;
+    border-radius: 11px;
+    background: rgba(115,92,255,.14);
+    border: 1px solid rgba(115,92,255,.2);
+    font-size: 9px;
+    font-weight: 900;
 }
 
-.spinner {
-    width: 13px;
-    height: 13px;
-    border: 2px solid rgb(58, 67, 78);
-    border-top-color: rgb(236, 240, 244);
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
+.empty {
+    text-align: center;
+    padding: 60px 20px;
+    border: 1px dashed rgba(255,255,255,.08);
+    border-radius: 20px;
 }
 
-@keyframes spin {
-    to {
-        transform: rotate(360deg);
+.empty-symbol {
+    font-size: 35px;
+    color: #6873ff;
+}
+
+.empty-title {
+    margin-top: 13px;
+    font-weight: 900;
+}
+
+.empty-text {
+    color: #69748d;
+    margin-top: 6px;
+    font-size: 12px;
+}
+
+footer {
+    border-top: 1px solid rgba(255,255,255,.06);
+    padding: 28px 0;
+    text-align: center;
+    color: #555f76;
+    font-size: 10px;
+}
+
+@media(max-width:850px) {
+    .stats {
+        grid-template-columns: repeat(2,1fr);
     }
-}
 
-@media (max-width: 720px) {
-
-    .page {
-        width: min(100% - 18px, 980px);
-        padding-top: 12px;
-    }
-
-    .topbar {
+    .history-item {
         align-items: flex-start;
+        flex-direction: column;
     }
 
-    .hero {
-        padding: 48px 0 28px;
+    .history-coordinates {
+        width: 100%;
+        flex-wrap: wrap;
+    }
+}
+
+@media(max-width:600px) {
+    .container {
+        width: min(100% - 20px,1200px);
+    }
+
+    nav {
+        height: 70px;
+    }
+
+    .nav-info .badge:first-child {
+        display: none;
+    }
+
+    main {
+        padding-top: 42px;
+    }
+
+    h1 {
+        letter-spacing: -2px;
     }
 
     .panel {
-        padding: 20px;
+        padding: 19px;
     }
 
-    .grid {
-        grid-template-columns: 1fr;
+    .panel-header {
+        align-items: flex-start;
+        flex-direction: column;
     }
 
-    .cards {
-        grid-template-columns: 1fr;
+    .consent-actions {
+        flex-direction: column;
+    }
+
+    button {
+        width: 100%;
     }
 }
-
 </style>
 </head>
+
 <body>
 
-<div class="page">
+<div class="container">
 
-<header class="topbar">
+<nav>
+    <div class="logo">
+        <div class="logo-mark">◈</div>
+        <span>PUGILAIN</span>
+    </div>
 
-<div class="brand">
+    <div class="nav-info">
+        <div class="badge">LOCAL GEO</div>
+        <div class="badge online">● ONLINE</div>
+    </div>
+</nav>
 
-<div class="logo">
-P
-</div>
-
-<div>
-
-<div class="brand-title">
-{{APP_NAME}}
-</div>
-
-<div class="brand-subtitle">
-Approximate IP Geolocation
-</div>
-
-</div>
-
-</div>
-
-<div class="status">
-
-<span class="status-dot"></span>
-
-ONLINE
-
-</div>
-
-</header>
+<main>
 
 <section class="hero">
-
-<div class="eyebrow">
-CONSENSO ESPLICITO
-</div>
-
-<h1>
-Geolocalizzazione approssimativa tramite IP.
-</h1>
-
-<p class="hero-text">
-Questa pagina esegue un lookup geografico approssimativo
-solo dopo un consenso esplicito. Non utilizza il GPS del browser,
-non effettua fingerprinting e non crea uno storico degli IP.
-</p>
-
+    <div class="kicker">LOCAL PRIVACY CONSOLE</div>
+    <h1>
+        <span class="gradient">Geolocation</span><br>
+        con consenso.
+    </h1>
+    <div class="subtitle">
+        Console locale per richieste di geolocalizzazione autorizzate,
+        con dashboard, statistiche e storico persistente sul computer.
+    </div>
 </section>
 
 <section class="panel">
 
-<div class="panel-title">
-Prima di continuare
+<div class="panel-header">
+    <div>
+        <div class="panel-title">Richiesta posizione</div>
+        <div class="panel-description">
+            Il browser mostrerà la propria finestra di autorizzazione.
+        </div>
+    </div>
+
+    <div class="badge">CONSENSO OBBLIGATORIO</div>
 </div>
 
-<div class="panel-subtitle">
-Il lookup viene eseguito solamente dopo aver selezionato
-la casella di consenso. La posizione ottenuta dall'IP è
-approssimativa e non deve essere interpretata come posizione GPS.
+<div class="consent-box">
+    <div class="consent-title">Prima di continuare</div>
+
+    La posizione del dispositivo verrà richiesta tramite la normale
+    autorizzazione del browser. Se l'utente rifiuta, nessuna posizione
+    GPS viene inviata. Se accetta, i dati della richiesta vengono mostrati
+    nella console locale e possono essere mantenuti nello storico locale.
 </div>
 
-<label class="consent">
-
-<input
-id="consent"
-type="checkbox"
->
-
-<span class="consent-text">
-
-<strong>
-Acconsento al lookup dell'IP per ottenere una posizione geografica approssimativa.
-</strong>
-
-<br>
-
-Comprendo che il servizio di geolocalizzazione può fornire
-un risultato impreciso e che l'indirizzo IP necessario al
-lookup viene trasmesso al provider geografico.
-
-</span>
-
-</label>
-
-<div class="actions">
-
-<button
-id="lookup"
-class="primary"
-disabled
->
-Ottieni posizione approssimativa
-</button>
-
-<button
-id="clear"
-class="secondary"
->
-Pulisci risultato
-</button>
-
+<div class="consent-actions">
+    <button onclick="requestLocation()">CONSENTI E CONTINUA</button>
+    <button class="secondary" onclick="loadHistory()">AGGIORNA STORICO</button>
 </div>
 
-<div
-id="result"
-class="result-wrap"
->
+<div id="status" class="status-box"></div>
 
-<div class="empty">
+</section>
 
-<div class="empty-icon">
-◎
+<section class="stats">
+
+<div class="stat">
+    <div class="stat-label">RICHIESTE</div>
+    <div class="stat-value" id="requests">0</div>
 </div>
 
-<div>
-Seleziona il consenso per abilitare il lookup.
+<div class="stat">
+    <div class="stat-label">CONSENSI</div>
+    <div class="stat-value" id="accepted">0</div>
 </div>
 
+<div class="stat">
+    <div class="stat-label">RIFIUTI</div>
+    <div class="stat-value" id="rejected">0</div>
 </div>
 
+<div class="stat">
+    <div class="stat-label">STORICO</div>
+    <div class="stat-value" id="historyCount">0</div>
+</div>
+
+<div class="stat">
+    <div class="stat-label">UPTIME</div>
+    <div class="stat-value" id="uptime">0s</div>
 </div>
 
 </section>
 
-<div class="cards">
+<section class="panel history-panel">
 
-<div class="card">
+<div class="panel-header">
 
-<strong>
-GPS disattivato
-</strong>
-
-<span>
-La pagina non richiede permessi di posizione al browser.
-</span>
-
+<div>
+    <div class="panel-title">History</div>
+    <div class="panel-description">
+        Storico salvato esclusivamente nella directory locale dell'applicazione.
+    </div>
 </div>
 
-<div class="card">
+<div class="history-tools">
+    <input
+        id="search"
+        class="search"
+        type="text"
+        placeholder="Cerca IP, città o paese..."
+        oninput="filterHistory()"
+    >
 
-<strong>
-Fingerprinting disattivato
-</strong>
+    <button class="secondary" onclick="exportHistory()">ESPORTA</button>
 
-<span>
-Nessuna analisi delle caratteristiche hardware o browser del visitatore.
-</span>
-
-</div>
-
-<div class="card">
-
-<strong>
-Storico disattivato
-</strong>
-
-<span>
-Gli IP non vengono scritti su file e non viene creato uno storico visite.
-</span>
-
+    <button class="danger" onclick="clearHistory()">SVUOTA</button>
 </div>
 
 </div>
 
-<footer class="footer">
+<div id="history" class="history-list"></div>
 
-{{APP_NAME}}
-·
-{{VERSION}}
-·
-consenso obbligatorio
-·
-server locale
+</section>
 
+</main>
+
+<footer>
+    PUGILAIN LOCAL GEO · VERSION 4.0 · LOCALHOST ONLY
 </footer>
 
 </div>
 
 <script>
+let historyData = [];
 
-const consent =
-document.getElementById("consent");
-
-const lookup =
-document.getElementById("lookup");
-
-const clearButton =
-document.getElementById("clear");
-
-const result =
-document.getElementById("result");
-
-
-function escapeValue(value) {
-
-    const node =
-        document.createElement("div");
-
-    node.textContent =
-        value === null ||
-        value === undefined
-            ? "N/A"
-            : String(value);
-
-    return node.innerHTML;
+function showStatus(message) {
+    const element = document.getElementById("status");
+    element.textContent = message;
+    element.classList.add("visible");
 }
 
-
-function empty(message) {
-
-    result.innerHTML =
-        '<div class="empty">' +
-        '<div class="empty-icon">◎</div>' +
-        '<div>' +
-        escapeValue(message) +
-        '</div>' +
-        '</div>';
-
-}
-
-
-function loading(value) {
-
-    if (value) {
-
-        lookup.disabled = true;
-
-        lookup.innerHTML =
-            '<span class="loading">' +
-            '<span class="spinner"></span>' +
-            'Lookup in corso' +
-            '</span>';
-
-    } else {
-
-        lookup.disabled =
-            !consent.checked;
-
-        lookup.textContent =
-            "Ottieni posizione approssimativa";
-
+function requestLocation() {
+    if (!navigator.geolocation) {
+        showStatus("Questo browser non supporta la geolocalizzazione.");
+        return;
     }
 
+    showStatus("Richiesta del consenso in corso...");
+
+    navigator.geolocation.getCurrentPosition(
+        function(position) {
+            const latitude = position.coords.latitude;
+            const longitude = position.coords.longitude;
+            const accuracy = position.coords.accuracy;
+
+            showStatus("Consenso ricevuto. Invio della posizione al server locale...");
+
+            fetch("/api/collect", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    consent: true,
+                    latitude: latitude,
+                    longitude: longitude,
+                    accuracy: accuracy
+                })
+            })
+            .then(function(response) {
+                return response.json();
+            })
+            .then(function(data) {
+                if (!data.success) {
+                    showStatus(data.error || "Errore durante la richiesta.");
+                    return;
+                }
+
+                showStatus(
+                    "Posizione ricevuta. Record aggiunto allo storico locale."
+                );
+
+                loadHistory();
+            })
+            .catch(function() {
+                showStatus("Impossibile comunicare con il server locale.");
+            });
+        },
+        function(error) {
+            if (error.code === 1) {
+                showStatus("Posizione rifiutata dall'utente.");
+            } else if (error.code === 2) {
+                showStatus("Posizione non disponibile.");
+            } else if (error.code === 3) {
+                showStatus("Richiesta di posizione scaduta.");
+            } else {
+                showStatus("Richiesta di posizione non riuscita.");
+            }
+
+            fetch("/api/rejected", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    consent: false
+                })
+            })
+            .then(function() {
+                loadHistory();
+            })
+            .catch(function() {});
+        },
+        {
+            enableHighAccuracy: true,
+            timeout: 15000,
+            maximumAge: 0
+        }
+    );
 }
 
+function loadHistory() {
+    fetch("/api/history")
+        .then(function(response) {
+            return response.json();
+        })
+        .then(function(data) {
+            historyData = data.history || [];
+            renderHistory(historyData);
+            updateStats();
+        })
+        .catch(function() {
+            showStatus("Impossibile caricare lo storico.");
+        });
+}
 
-function render(payload) {
+function updateStats() {
+    fetch("/api/stats")
+        .then(function(response) {
+            return response.json();
+        })
+        .then(function(data) {
+            document.getElementById("requests").textContent = data.requests;
+            document.getElementById("accepted").textContent = data.accepted;
+            document.getElementById("rejected").textContent = data.rejected;
+            document.getElementById("historyCount").textContent = data.history;
+            document.getElementById("uptime").textContent = formatUptime(data.uptime);
+        })
+        .catch(function() {});
+}
 
-    if (
-        !payload ||
-        payload.success !== true
-    ) {
+function formatUptime(seconds) {
+    seconds = Number(seconds) || 0;
 
-        const message =
-            payload &&
-            payload.error
-                ? payload.error
-                : "Lookup non riuscito.";
+    const days = Math.floor(seconds / 86400);
+    seconds %= 86400;
 
-        result.innerHTML =
-            '<div class="result error">' +
-            '<div class="eyebrow">ERRORE</div>' +
-            '<h2>' +
-            escapeValue(message) +
-            '</h2>' +
-            '</div>';
+    const hours = Math.floor(seconds / 3600);
+    seconds %= 3600;
+
+    const minutes = Math.floor(seconds / 60);
+    seconds %= 60;
+
+    let output = "";
+
+    if (days) {
+        output += days + "d ";
+    }
+
+    if (hours) {
+        output += hours + "h ";
+    }
+
+    if (minutes) {
+        output += minutes + "m ";
+    }
+
+    output += seconds + "s";
+
+    return output;
+}
+
+function escapeHtml(value) {
+    const element = document.createElement("div");
+    element.textContent = value == null ? "" : String(value);
+    return element.innerHTML;
+}
+
+function renderHistory(items) {
+    const container = document.getElementById("history");
+
+    if (!items.length) {
+        container.innerHTML = `
+            <div class="empty">
+                <div class="empty-symbol">◎</div>
+                <div class="empty-title">Nessun dato nello storico</div>
+                <div class="empty-text">
+                    Le richieste autorizzate appariranno qui.
+                </div>
+            </div>
+        `;
 
         return;
     }
 
+    container.innerHTML = items.map(function(item) {
+        const date = new Date(item.timestamp).toLocaleString();
 
-    const data =
-        payload.data || {};
+        const latitude = Number(item.latitude).toFixed(6);
+        const longitude = Number(item.longitude).toFixed(6);
 
-
-    const rows = [
-
-        ["IP", data.ip],
-
-        ["Paese", data.country],
-
-        ["Codice", data.country_code],
-
-        ["Regione", data.region],
-
-        ["Città", data.city],
-
-        ["CAP", data.postal_code],
-
-        ["Fuso orario", data.timezone],
-
-        ["Latitudine", data.latitude],
-
-        ["Longitudine", data.longitude],
-
-        ["Precisione", "Approssimativa"]
-
-    ];
-
-
-    let cells = "";
-
-
-    for (
-        const row of rows
-    ) {
-
-        cells +=
-            '<div class="data-row">' +
-            '<span>' +
-            escapeValue(row[0]) +
-            '</span>' +
-            '<strong>' +
-            escapeValue(row[1]) +
-            '</strong>' +
-            '</div>';
-
-    }
-
-
-    let map = "";
-
-
-    if (
-        data.latitude !== null &&
-        data.latitude !== undefined &&
-        data.longitude !== null &&
-        data.longitude !== undefined
-    ) {
-
-        const link =
-            "https://www.openstreetmap.org/" +
-            "?mlat=" +
-            encodeURIComponent(data.latitude) +
+        const map =
+            "https://www.openstreetmap.org/?mlat=" +
+            encodeURIComponent(item.latitude) +
             "&mlon=" +
-            encodeURIComponent(data.longitude) +
-            "&zoom=10";
+            encodeURIComponent(item.longitude);
 
+        return `
+            <div class="history-item">
+                <div class="history-main">
+                    <div class="history-date">
+                        ${escapeHtml(date)}
+                    </div>
 
-        map =
-            '<a class="map-button" href="' +
-            link +
-            '" target="_blank" rel="noreferrer">' +
-            'Apri mappa' +
-            '</a>';
+                    <div class="history-ip">
+                        ${escapeHtml(item.ip)}
+                    </div>
 
-    }
+                    <div class="history-location">
+                        ${escapeHtml(item.city || "Posizione GPS")}
+                        <span>•</span>
+                        ${escapeHtml(item.country || "—")}
+                    </div>
+                </div>
 
+                <div class="history-coordinates">
+                    <div>
+                        <span>LAT</span>
+                        <strong>${escapeHtml(latitude)}</strong>
+                    </div>
 
-    result.innerHTML =
-        '<div class="result">' +
+                    <div>
+                        <span>LON</span>
+                        <strong>${escapeHtml(longitude)}</strong>
+                    </div>
 
-        '<div class="result-head">' +
+                    <div>
+                        <span>ACC</span>
+                        <strong>${escapeHtml(item.accuracy || "—")} m</strong>
+                    </div>
 
-        '<div>' +
-
-        '<div class="eyebrow">' +
-        'RISULTATO' +
-        '</div>' +
-
-        '<h2>' +
-        'Geolocalizzazione IP' +
-        '</h2>' +
-
-        '</div>' +
-
-        '<div class="pill">' +
-        'CONSENSO' +
-        '</div>' +
-
-        '</div>' +
-
-        '<div class="grid">' +
-        cells +
-        '</div>' +
-
-        map +
-
-        '<div class="notice">' +
-        'Il risultato è temporaneo e non viene salvato nello storico.' +
-        '</div>' +
-
-        '</div>';
-
+                    <a
+                        class="small-button"
+                        href="${escapeHtml(map)}"
+                        target="_blank"
+                        rel="noreferrer"
+                    >
+                        MAPPA
+                    </a>
+                </div>
+            </div>
+        `;
+    }).join("");
 }
 
+function filterHistory() {
+    const query =
+        document.getElementById("search").value
+        .toLowerCase()
+        .trim();
 
-consent.addEventListener(
-    "change",
-    function() {
+    if (!query) {
+        renderHistory(historyData);
+        return;
+    }
 
-        lookup.disabled =
-            !consent.checked;
+    const filtered = historyData.filter(function(item) {
+        const values = [
+            item.ip,
+            item.city,
+            item.country,
+            item.country_code,
+            item.region,
+            item.postal,
+            item.latitude,
+            item.longitude
+        ];
 
-        if (!consent.checked) {
+        return values.some(function(value) {
+            return String(value || "")
+                .toLowerCase()
+                .includes(query);
+        });
+    });
 
-            empty(
-                "Seleziona il consenso per abilitare il lookup."
+    renderHistory(filtered);
+}
+
+function exportHistory() {
+    fetch("/api/export")
+        .then(function(response) {
+            return response.json();
+        })
+        .then(function(data) {
+            const blob = new Blob(
+                [JSON.stringify(data, null, 2)],
+                {
+                    type: "application/json"
+                }
             );
 
-        }
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
 
+            link.href = url;
+            link.download = "pugilain-history.json";
+            link.click();
+
+            URL.revokeObjectURL(url);
+        })
+        .catch(function() {
+            showStatus("Esportazione non riuscita.");
+        });
+}
+
+function clearHistory() {
+    const confirmed = confirm(
+        "Vuoi eliminare definitivamente lo storico locale?"
+    );
+
+    if (!confirmed) {
+        return;
     }
-);
 
-
-clearButton.addEventListener(
-    "click",
-    function() {
-
-        empty(
-            "Risultato cancellato dalla pagina."
-        );
-
-    }
-);
-
-
-lookup.addEventListener(
-    "click",
-    async function() {
-
-        if (!consent.checked) {
-            return;
+    fetch("/api/history", {
+        method: "DELETE"
+    })
+    .then(function(response) {
+        return response.json();
+    })
+    .then(function(data) {
+        if (data.success) {
+            historyData = [];
+            renderHistory([]);
+            loadHistory();
+            showStatus("Storico eliminato.");
         }
+    })
+    .catch(function() {
+        showStatus("Impossibile eliminare lo storico.");
+    });
+}
 
-        loading(true);
+loadHistory();
 
-        try {
-
-            const response =
-                await fetch(
-                    "/api/location",
-                    {
-                        method: "POST",
-                        headers: {
-                            "Content-Type":
-                                "application/json"
-                        },
-                        body:
-                            JSON.stringify(
-                                {
-                                    consent: true,
-                                    purpose:
-                                        "approximate_ip_geolocation",
-                                    consent_version:
-                                        "1.0"
-                                }
-                            )
-                    }
-                );
-
-
-            const payload =
-                await response.json();
-
-
-            render(payload);
-
-        } catch (error) {
-
-            result.innerHTML =
-                '<div class="result error">' +
-                '<div class="eyebrow">' +
-                'ERRORE' +
-                '</div>' +
-                '<h2>' +
-                'Impossibile contattare il server.' +
-                '</h2>' +
-                '</div>';
-
-        } finally {
-
-            loading(false);
-
-        }
-
-    }
-);
-
+setInterval(function() {
+    loadHistory();
+}, 5000);
 </script>
 
 </body>
@@ -3184,24 +1428,319 @@ lookup.addEventListener(
 """
 
 
-def main():
+class Handler(BaseHTTPRequestHandler):
+
+    def log_message(self, format_string, *args):
+        return
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:5000")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/":
+            html_send(self, render_dashboard())
+            return
+
+        if path == "/api/stats":
+            json_send(self, statistics())
+            return
+
+        if path == "/api/history":
+            history = load_history()
+            json_send(self, {
+                "success": True,
+                "history": history
+            })
+            return
+
+        if path == "/api/export":
+            history = load_history()
+
+            json_send(self, {
+                "success": True,
+                "exported_at": now_iso(),
+                "count": len(history),
+                "history": history
+            })
+
+            return
+
+        if path == "/api/instance":
+            instance = initialize_instance()
+
+            json_send(self, {
+                "success": True,
+                "instance": instance
+            })
+
+            return
+
+        if path == "/favicon.ico":
+            self.send_response(204)
+            self.end_headers()
+            return
+
+        json_send(
+            self,
+            {
+                "success": False,
+                "error": "Endpoint non trovato."
+            },
+            404
+        )
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/api/rejected":
+            update_state("rejected")
+            json_send(self, {
+                "success": True
+            })
+            return
+
+        if path != "/api/collect":
+            json_send(
+                self,
+                {
+                    "success": False,
+                    "error": "Endpoint non trovato."
+                },
+                404
+            )
+            return
+
+        update_state("requests")
+
+        payload = read_json(self)
+
+        if not payload.get("consent"):
+            update_state("rejected")
+
+            json_send(
+                self,
+                {
+                    "success": False,
+                    "error": "Consenso richiesto."
+                },
+                403
+            )
+
+            return
+
+        latitude = payload.get("latitude")
+        longitude = payload.get("longitude")
+        accuracy = payload.get("accuracy")
+
+        if not is_valid_coordinate(latitude, longitude):
+            update_state("errors")
+
+            json_send(
+                self,
+                {
+                    "success": False,
+                    "error": "Coordinate non valide."
+                },
+                400
+            )
+
+            return
+
+        ip = get_ip_from_request(self)
+
+        ip_info = get_ip_information(ip)
+
+        if not ip_info.get("success"):
+            ip_info = {
+                "country": "",
+                "country_code": "",
+                "region": "",
+                "city": "",
+                "postal": "",
+                "timezone": ""
+            }
+
+        entry = make_entry(
+            ip,
+            latitude,
+            longitude,
+            accuracy,
+            ip_info
+        )
+
+        append_history(entry)
+        update_state("accepted")
+
+        json_send(
+            self,
+            {
+                "success": True,
+                "entry": entry
+            }
+        )
+
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path != "/api/history":
+            json_send(
+                self,
+                {
+                    "success": False,
+                    "error": "Endpoint non trovato."
+                },
+                404
+            )
+
+            return
+
+        delete_history()
+
+        json_send(
+            self,
+            {
+                "success": True,
+                "message": "Storico eliminato."
+            }
+        )
+
+
+def start_server():
+    server = HTTPServer(
+        (HOST, PORT),
+        Handler
+    )
+
+    print()
+    print("╭──────────────────────────────────────────────────────────────╮")
+    print("│ SERVER                                                        │")
+    print("├──────────────────────────────────────────────────────────────┤")
+    print("│ Host        127.0.0.1                                        │")
+    print("│ Port        5000                                             │")
+    print("│ Mode        LOCAL                                            │")
+    print("│ History     ENABLED                                          │")
+    print("╰──────────────────────────────────────────────────────────────╯")
+    print()
+
+    return server
+
+
+def open_browser():
+    url = f"http://{HOST}:{PORT}/"
+
     try:
-        startup()
-        menu_loop()
+        webbrowser.open(url)
+    except Exception:
+        pass
+
+
+def show_console_info(instance, key):
+    print()
+    print("┌──────────────────────────────────────────────────────────────┐")
+    print("│ INSTANCE                                                     │")
+    print("├──────────────────────────────────────────────────────────────┤")
+    print("│ ID                                                           │")
+    print("│ " + instance["instance_id"])
+    print("│                                                              │")
+    print("│ KEY                                                          │")
+    print("│ " + key)
+    print("│                                                              │")
+    print("│ HISTORY                                                      │")
+    print("│ " + HISTORY_FILE)
+    print("└──────────────────────────────────────────────────────────────┘")
+    print()
+
+
+def run_server():
+    instance = initialize_instance()
+    key = initialize_key()
+    initialize_config()
+    initialize_history()
+
+    clear()
+    banner()
+
+    loading("Inizializzazione", 1.0)
+    loading("Caricamento configurazione", 0.8)
+    loading("Preparazione storico locale", 0.8)
+
+    show_console_info(instance, key)
+
+    server = start_server()
+
+    open_browser()
+
+    print("Dashboard aperta.")
+    print("Premi CTRL+C per arrestare il server.")
+    print()
+
+    try:
+        server.serve_forever()
+
     except KeyboardInterrupt:
         print()
-        print(
-            "\033[93m"
-            "Interruzione ricevuta."
-            "\033[0m"
-        )
+        print("Arresto del server...")
+
     finally:
-        shutdown()
-        print(
-            "\033[92m"
-            "[✓] PUGILAIN chiuso correttamente."
-            "\033[0m"
-        )
+        server.server_close()
+        print("Server arrestato.")
+
+
+def main():
+    ensure_directory()
+
+    if len(sys.argv) > 1:
+        command = sys.argv[1].lower()
+
+        if command == "reset":
+            instance, key = reset_instance()
+
+            print()
+            print("Istanza resettata.")
+            print("Instance ID:", instance["instance_id"])
+            print("Nuova key:", key)
+            print()
+
+            return
+
+        if command == "clear":
+            delete_history()
+
+            print()
+            print("Storico eliminato.")
+            print()
+
+            return
+
+        if command == "info":
+            instance = initialize_instance()
+            key = initialize_key()
+            config = initialize_config()
+            history = initialize_history()
+
+            print()
+            print("APP:", APP_NAME)
+            print("VERSION:", VERSION)
+            print("HOST:", HOST)
+            print("PORT:", PORT)
+            print("INSTANCE:", instance["instance_id"])
+            print("HISTORY:", len(history))
+            print("DIRECTORY:", BASE_DIR)
+            print("KEY:", key)
+            print()
+
+            return
+
+    run_server()
 
 
 if __name__ == "__main__":
