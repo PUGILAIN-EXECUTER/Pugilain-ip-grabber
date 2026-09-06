@@ -1,967 +1,435 @@
 import os
-import sys
 import json
-import time
 import uuid
-import socket
+import time
 import secrets
-import hashlib
 import threading
 import webbrowser
 from datetime import datetime, timezone
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse
 
-APP_NAME = "PUGILAIN LOCAL GEO"
-VERSION = "4.0"
 HOST = "127.0.0.1"
 PORT = 5000
 
-BASE_DIR = os.path.join(os.path.expanduser("~"), "Desktop", "PugilainLocalGeo")
+BASE_DIR = os.path.join(os.path.expanduser("~"), "Desktop", "PugilainGeo")
+PUBLIC_DIR = os.path.join(BASE_DIR, "netlify")
 HISTORY_FILE = os.path.join(BASE_DIR, "history.json")
-INSTANCE_FILE = os.path.join(BASE_DIR, "instance.json")
-KEY_FILE = os.path.join(BASE_DIR, "key.txt")
+TOKENS_FILE = os.path.join(BASE_DIR, "tokens.json")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
-LOCK = threading.RLock()
-
-STATE = {
-    "started": time.time(),
-    "requests": 0,
-    "accepted": 0,
-    "rejected": 0,
-    "errors": 0,
-    "last_activity": None
-}
+os.makedirs(BASE_DIR, exist_ok=True)
+os.makedirs(PUBLIC_DIR, exist_ok=True)
 
 
-def clear():
-    os.system("cls" if os.name == "nt" else "clear")
+def load_json(path, default):
+    if not os.path.exists(path):
+        return default
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
 
 
-def slow_print(text, delay=0.008):
-    for char in text:
-        print(char, end="", flush=True)
-        time.sleep(delay)
-    print()
+def save_json(path, data):
+    temp = path + ".tmp"
+
+    with open(temp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+    os.replace(temp, path)
 
 
-def loading(text, duration=1.0):
-    sequence = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-    end = time.time() + duration
-    index = 0
+history = load_json(HISTORY_FILE, [])
+tokens = load_json(TOKENS_FILE, {})
 
-    while time.time() < end:
-        print("\r" + text + " " + sequence[index % len(sequence)], end="", flush=True)
-        index += 1
-        time.sleep(0.07)
-
-    print("\r" + text + " ✓")
-
-
-def banner():
-    print()
-    print("╔══════════════════════════════════════════════════════════════════════════════╗")
-    print("║                                                                              ║")
-    print("║   ██████╗ ██╗   ██╗  ██████╗  ██╗ ██╗       █████╗  ██╗ ███╗   ██╗        ║")
-    print("║   ██╔══██╗██║   ██║ ██╔════╝  ██║ ██║      ██╔══██╗ ██║ ████╗  ██║        ║")
-    print("║   ██████╔╝██║   ██║ ██║  ███╗ ██║ ██║      ███████║ ██║ ██╔██╗ ██║        ║")
-    print("║   ██╔═══╝ ██║   ██║ ██║   ██║ ██║ ██║      ██╔══██║ ██║ ██║╚██╗██║        ║")
-    print("║   ██║     ╚██████╔╝ ╚██████╔╝ ██║ ███████╗ ██║  ██║ ██║ ██║ ╚████║        ║")
-    print("║   ╚═╝      ╚═════╝   ╚═════╝  ╚═╝ ╚══════╝ ╚═╝  ╚═╝ ╚═╝ ╚═╝  ╚═══╝        ║")
-    print("║                                                                              ║")
-    print("║                       ◈  LOCAL GEO CONSOLE  ◈                             ║")
-    print("║                                                                              ║")
-    print("║                    CONSENSO • HISTORY • DASHBOARD                          ║")
-    print("║                                                                              ║")
-    print("╚══════════════════════════════════════════════════════════════════════════════╝")
-    print()
-
-
-def ensure_directory():
-    os.makedirs(BASE_DIR, exist_ok=True)
-
-
-def now_iso():
-    return datetime.now(timezone.utc).isoformat()
-
-
-def generate_instance_id():
-    seed = "|".join([
-        socket.gethostname(),
-        sys.platform,
-        str(uuid.getnode()),
-        os.path.abspath(BASE_DIR)
-    ])
-
-    return hashlib.sha256(seed.encode()).hexdigest()[:32]
-
-
-def generate_key():
-    return secrets.token_urlsafe(32)
-
-
-def initialize_instance():
-    ensure_directory()
-
-    if os.path.exists(INSTANCE_FILE):
-        try:
-            with open(INSTANCE_FILE, "r", encoding="utf-8") as file:
-                instance = json.load(file)
-
-            if instance.get("instance_id"):
-                return instance
-
-        except Exception:
-            pass
-
-    instance = {
-        "instance_id": generate_instance_id(),
-        "created_at": now_iso()
-    }
-
-    with open(INSTANCE_FILE, "w", encoding="utf-8") as file:
-        json.dump(instance, file, indent=2, ensure_ascii=False)
-
-    return instance
-
-
-def initialize_key():
-    ensure_directory()
-
-    if os.path.exists(KEY_FILE):
-        try:
-            with open(KEY_FILE, "r", encoding="utf-8") as file:
-                key = file.read().strip()
-
-            if key:
-                return key
-
-        except Exception:
-            pass
-
-    key = generate_key()
-
-    with open(KEY_FILE, "w", encoding="utf-8") as file:
-        file.write(key)
-
-    return key
-
-
-def initialize_config():
-    ensure_directory()
-
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as file:
-                config = json.load(file)
-
-            if isinstance(config, dict):
-                return config
-
-        except Exception:
-            pass
-
-    config = {
-        "app_name": APP_NAME,
-        "version": VERSION,
-        "host": HOST,
+config = load_json(
+    CONFIG_FILE,
+    {
+        "name": "Pugilain Geo",
+        "version": "1.0",
         "port": PORT,
-        "history_enabled": True,
-        "consent_required": True,
-        "local_only": True
+        "created": datetime.now(timezone.utc).isoformat()
+    }
+)
+
+save_json(CONFIG_FILE, config)
+
+
+def create_token():
+    token = secrets.token_urlsafe(32)
+
+    tokens[token] = {
+        "created": datetime.now(timezone.utc).isoformat(),
+        "events": 0,
+        "active": True
     }
 
-    with open(CONFIG_FILE, "w", encoding="utf-8") as file:
-        json.dump(config, file, indent=2, ensure_ascii=False)
+    save_json(TOKENS_FILE, tokens)
 
-    return config
-
-
-def initialize_history():
-    ensure_directory()
-
-    if not os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE, "w", encoding="utf-8") as file:
-            json.dump([], file, ensure_ascii=False)
-
-        return []
-
-    try:
-        with open(HISTORY_FILE, "r", encoding="utf-8") as file:
-            data = json.load(file)
-
-        if isinstance(data, list):
-            return data
-
-    except Exception:
-        pass
-
-    with open(HISTORY_FILE, "w", encoding="utf-8") as file:
-        json.dump([], file)
-
-    return []
+    return token
 
 
-def load_history():
-    with LOCK:
-        return initialize_history()
-
-
-def save_history(history):
-    with LOCK:
-        with open(HISTORY_FILE, "w", encoding="utf-8") as file:
-            json.dump(history, file, indent=2, ensure_ascii=False)
-
-
-def append_history(entry):
-    history = load_history()
-    history.append(entry)
-    save_history(history)
-
-
-def delete_history():
-    save_history([])
-
-
-def reset_instance():
-    ensure_directory()
-
-    instance = {
-        "instance_id": generate_instance_id(),
-        "created_at": now_iso(),
-        "reset_at": now_iso()
-    }
-
-    with open(INSTANCE_FILE, "w", encoding="utf-8") as file:
-        json.dump(instance, file, indent=2, ensure_ascii=False)
-
-    key = generate_key()
-
-    with open(KEY_FILE, "w", encoding="utf-8") as file:
-        file.write(key)
-
-    return instance, key
-
-
-def escape_html(value):
-    if value is None:
-        return ""
-
-    value = str(value)
-
-    replacements = [
-        ("&", "&amp;"),
-        ("<", "&lt;"),
-        (">", "&gt;"),
-        ('"', "&quot;"),
-        ("'", "&#39;")
-    ]
-
-    for source, target in replacements:
-        value = value.replace(source, target)
-
-    return value
-
-
-def format_time(value):
-    if not value:
-        return "—"
-
-    try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return dt.astimezone().strftime("%d/%m/%Y %H:%M:%S")
-    except Exception:
-        return value
-
-
-def format_number(value):
-    if value is None:
-        return "—"
-
-    try:
-        return f"{float(value):.6f}"
-    except Exception:
-        return str(value)
-
-
-def is_valid_coordinate(latitude, longitude):
-    try:
-        latitude = float(latitude)
-        longitude = float(longitude)
-    except Exception:
+def add_event(token, event):
+    if token not in tokens:
         return False
 
-    return -90 <= latitude <= 90 and -180 <= longitude <= 180
-
-
-def get_ip_from_request(handler):
-    address = handler.client_address
-
-    if not address:
-        return ""
-
-    return address[0]
-
-
-def get_ip_information(ip):
-    if not ip:
-        return {
-            "success": False,
-            "error": "IP non disponibile."
-        }
-
-    try:
-        request = Request(
-            "https://ipwho.is/" + ip,
-            headers={
-                "User-Agent": "PugilainLocalGeo/4.0"
-            }
-        )
-
-        with urlopen(request, timeout=8) as response:
-            raw = response.read().decode("utf-8", errors="replace")
-
-        data = json.loads(raw)
-
-        if not data.get("success"):
-            return {
-                "success": False,
-                "error": data.get("message", "Informazioni IP non disponibili.")
-            }
-
-        timezone_data = data.get("timezone") or {}
-
-        return {
-            "success": True,
-            "country": data.get("country", ""),
-            "country_code": data.get("country_code", ""),
-            "region": data.get("region", ""),
-            "city": data.get("city", ""),
-            "postal": data.get("postal", ""),
-            "latitude": data.get("latitude"),
-            "longitude": data.get("longitude"),
-            "timezone": timezone_data.get("id", "")
-        }
-
-    except HTTPError:
-        return {
-            "success": False,
-            "error": "Servizio IP non disponibile."
-        }
-
-    except URLError:
-        return {
-            "success": False,
-            "error": "Connessione al servizio IP non riuscita."
-        }
-
-    except Exception as error:
-        return {
-            "success": False,
-            "error": str(error)
-        }
-
-
-def update_state(field):
-    with LOCK:
-        STATE[field] += 1
-        STATE["last_activity"] = now_iso()
-
-
-def statistics():
-    with LOCK:
-        history = load_history()
-
-        return {
-            "requests": STATE["requests"],
-            "accepted": STATE["accepted"],
-            "rejected": STATE["rejected"],
-            "errors": STATE["errors"],
-            "history": len(history),
-            "uptime": int(time.time() - STATE["started"]),
-            "last_activity": STATE["last_activity"]
-        }
-
-
-def make_entry(ip, latitude, longitude, accuracy, ip_info):
-    return {
+    record = {
         "id": uuid.uuid4().hex,
-        "timestamp": now_iso(),
-        "ip": ip,
-        "latitude": float(latitude),
-        "longitude": float(longitude),
-        "accuracy": float(accuracy) if accuracy is not None else None,
-        "country": ip_info.get("country", ""),
-        "country_code": ip_info.get("country_code", ""),
-        "region": ip_info.get("region", ""),
-        "city": ip_info.get("city", ""),
-        "postal": ip_info.get("postal", ""),
-        "timezone": ip_info.get("timezone", "")
+        "token": token,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event": event
     }
 
+    history.append(record)
 
-def json_send(handler, payload, status=200):
-    raw = json.dumps(
-        payload,
-        ensure_ascii=False
-    ).encode("utf-8")
+    tokens[token]["events"] = tokens[token].get("events", 0) + 1
+
+    save_json(HISTORY_FILE, history)
+    save_json(TOKENS_FILE, tokens)
+
+    return True
+
+
+def json_response(handler, data, status=200):
+    raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
 
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(raw)))
     handler.send_header("Cache-Control", "no-store")
-    handler.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:5000")
-    handler.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+    handler.send_header("Access-Control-Allow-Origin", "*")
     handler.send_header("Access-Control-Allow-Headers", "Content-Type")
+    handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
     handler.end_headers()
+
     handler.wfile.write(raw)
 
 
-def html_send(handler, content, status=200):
-    raw = content.encode("utf-8")
+class LocalHandler(BaseHTTPRequestHandler):
 
-    handler.send_response(status)
-    handler.send_header("Content-Type", "text/html; charset=utf-8")
-    handler.send_header("Content-Length", str(len(raw)))
-    handler.send_header("Cache-Control", "no-store")
-    handler.end_headers()
-    handler.wfile.write(raw)
+    def log_message(self, format, *args):
+        print("[LOCAL]", format % args)
 
+    def do_OPTIONS(self):
+        json_response(self, {"ok": True})
 
-def read_json(handler):
-    try:
-        length = int(handler.headers.get("Content-Length", "0"))
+    def do_GET(self):
+        parsed = urlparse(self.path)
 
-        if length <= 0:
-            return {}
+        if parsed.path == "/":
+            html = DASHBOARD_HTML.encode("utf-8")
 
-        if length > 1024 * 64:
-            return {}
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(html)))
+            self.end_headers()
 
-        body = handler.rfile.read(length).decode("utf-8", errors="replace")
+            self.wfile.write(html)
+            return
 
-        return json.loads(body)
-
-    except Exception:
-        return {}
-
-
-def map_link(latitude, longitude):
-    if not is_valid_coordinate(latitude, longitude):
-        return ""
-
-    return (
-        "https://www.openstreetmap.org/"
-        "?mlat=" + str(latitude) +
-        "&mlon=" + str(longitude)
-    )
-
-
-def render_history_rows(history):
-    if not history:
-        return """
-        <div class="empty">
-            <div class="empty-symbol">◎</div>
-            <div class="empty-title">Nessun dato nello storico</div>
-            <div class="empty-text">Le richieste autorizzate appariranno qui.</div>
-        </div>
-        """
-
-    rows = []
-
-    for item in reversed(history):
-        map_url = map_link(
-            item.get("latitude"),
-            item.get("longitude")
-        )
-
-        map_button = ""
-
-        if map_url:
-            map_button = (
-                '<a class="small-button" href="' +
-                escape_html(map_url) +
-                '" target="_blank" rel="noreferrer">MAPPA</a>'
+        if parsed.path == "/api/history":
+            json_response(
+                self,
+                {
+                    "ok": True,
+                    "count": len(history),
+                    "history": history
+                }
             )
+            return
 
-        rows.append(
-            f"""
-            <div class="history-item">
-                <div class="history-main">
-                    <div class="history-date">
-                        {escape_html(format_time(item.get("timestamp")))}
-                    </div>
+        if parsed.path == "/api/tokens":
+            safe_tokens = {}
 
-                    <div class="history-ip">
-                        {escape_html(item.get("ip", "—"))}
-                    </div>
+            for token, data in tokens.items():
+                safe_tokens[token] = {
+                    "created": data.get("created"),
+                    "events": data.get("events", 0),
+                    "active": data.get("active", True)
+                }
 
-                    <div class="history-location">
-                        {escape_html(item.get("city") or "Posizione GPS")}
-                        <span>•</span>
-                        {escape_html(item.get("country") or "—")}
-                    </div>
-                </div>
+            json_response(
+                self,
+                {
+                    "ok": True,
+                    "tokens": safe_tokens
+                }
+            )
+            return
 
-                <div class="history-coordinates">
-                    <div>
-                        <span>LAT</span>
-                        <strong>{escape_html(format_number(item.get("latitude")))}</strong>
-                    </div>
+        if parsed.path == "/api/stats":
+            json_response(
+                self,
+                {
+                    "ok": True,
+                    "sessions": len(tokens),
+                    "events": len(history),
+                    "active_sessions": sum(
+                        1
+                        for value in tokens.values()
+                        if value.get("active", True)
+                    )
+                }
+            )
+            return
 
-                    <div>
-                        <span>LON</span>
-                        <strong>{escape_html(format_number(item.get("longitude")))}</strong>
-                    </div>
+        if parsed.path == "/api/health":
+            json_response(
+                self,
+                {
+                    "ok": True,
+                    "server": "Pugilain Geo",
+                    "time": datetime.now(timezone.utc).isoformat()
+                }
+            )
+            return
 
-                    <div>
-                        <span>ACC</span>
-                        <strong>{escape_html(item.get("accuracy") or "—")} m</strong>
-                    </div>
+        json_response(self, {"ok": False, "error": "Not found"}, 404)
 
-                    {map_button}
-                </div>
-            </div>
-            """
+    def do_POST(self):
+        parsed = urlparse(self.path)
+
+        if parsed.path != "/api/event":
+            json_response(self, {"ok": False, "error": "Not found"}, 404)
+            return
+
+        try:
+            size = int(self.headers.get("Content-Length", "0"))
+
+            if size <= 0 or size > 10000:
+                json_response(
+                    self,
+                    {
+                        "ok": False,
+                        "error": "Invalid request size"
+                    },
+                    400
+                )
+                return
+
+            body = self.rfile.read(size)
+            data = json.loads(body.decode("utf-8"))
+
+        except Exception:
+            json_response(
+                self,
+                {
+                    "ok": False,
+                    "error": "Invalid JSON"
+                },
+                400
+            )
+            return
+
+        token = str(data.get("token", "")).strip()
+        event = data.get("event")
+
+        if not token or token not in tokens:
+            json_response(
+                self,
+                {
+                    "ok": False,
+                    "error": "Invalid session token"
+                },
+                403
+            )
+            return
+
+        if not isinstance(event, dict):
+            json_response(
+                self,
+                {
+                    "ok": False,
+                    "error": "Invalid event"
+                },
+                400
+            )
+            return
+
+        event_type = str(event.get("type", "")).strip()
+
+        if event_type not in {
+            "consent",
+            "session_started",
+            "page_opened",
+            "location_available"
+        }:
+            json_response(
+                self,
+                {
+                    "ok": False,
+                    "error": "Unsupported event"
+                },
+                400
+            )
+            return
+
+        if not add_event(token, event):
+            json_response(
+                self,
+                {
+                    "ok": False,
+                    "error": "Unable to save event"
+                },
+                500
+            )
+            return
+
+        print()
+        print("========================================")
+        print("NUOVO EVENTO")
+        print("TOKEN:", token)
+        print("TIPO:", event_type)
+        print("ORA:", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        print("========================================")
+        print()
+
+        json_response(
+            self,
+            {
+                "ok": True,
+                "saved": True,
+                "token": token
+            }
         )
 
-    return "".join(rows)
 
-
-def render_dashboard():
-    return """
-<!DOCTYPE html>
+def create_netlify_index():
+    html = r'''<!DOCTYPE html>
 <html lang="it">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PUGILAIN LOCAL GEO</title>
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Pugilain Geo</title>
+
 <style>
 * {
     box-sizing: border-box;
 }
 
-html {
-    min-height: 100%;
-}
-
 body {
     margin: 0;
     min-height: 100vh;
-    color: #f7f8ff;
-    background:
-        radial-gradient(circle at 15% 10%, rgba(104,91,255,.16), transparent 30%),
-        radial-gradient(circle at 85% 20%, rgba(40,205,255,.11), transparent 28%),
-        #070a10;
-    font-family: Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-}
-
-body:before {
-    content: "";
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    opacity: .5;
-    background-image:
-        linear-gradient(rgba(255,255,255,.018) 1px,transparent 1px),
-        linear-gradient(90deg,rgba(255,255,255,.018) 1px,transparent 1px);
-    background-size: 36px 36px;
+    background: #09090b;
+    color: #f4f4f5;
+    font-family: Arial, Helvetica, sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 24px;
 }
 
 .container {
-    width: min(1200px,calc(100% - 32px));
-    margin: auto;
+    width: 100%;
+    max-width: 680px;
 }
 
-nav {
-    height: 84px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    border-bottom: 1px solid rgba(255,255,255,.07);
+.card {
+    background: #111113;
+    border: 1px solid #27272a;
+    border-radius: 18px;
+    padding: 32px;
+    box-shadow: 0 20px 70px rgba(0,0,0,.4);
 }
 
 .logo {
+    width: 54px;
+    height: 54px;
+    border-radius: 15px;
+    background: #27272a;
     display: flex;
     align-items: center;
-    gap: 13px;
-    font-weight: 900;
-    letter-spacing: 3px;
-}
-
-.logo-mark {
-    width: 42px;
-    height: 42px;
-    border-radius: 13px;
-    display: grid;
-    place-items: center;
-    background: linear-gradient(135deg,#765cff,#26d5ef);
-    box-shadow: 0 0 35px rgba(93,92,255,.3);
-}
-
-.nav-info {
-    display: flex;
-    gap: 9px;
-}
-
-.badge {
-    padding: 9px 13px;
-    border-radius: 999px;
-    border: 1px solid rgba(255,255,255,.08);
-    background: rgba(255,255,255,.035);
-    color: #929cb5;
-    font-size: 10px;
-    font-weight: 800;
-    letter-spacing: 1.4px;
-}
-
-.online {
-    color: #a9f8c3;
-    border-color: rgba(95,235,140,.2);
-}
-
-main {
-    padding: 68px 0 90px;
-}
-
-.hero {
-    max-width: 850px;
-    margin-bottom: 38px;
-}
-
-.kicker {
-    color: #8f8cff;
-    font-size: 11px;
-    letter-spacing: 4px;
-    font-weight: 900;
-    margin-bottom: 17px;
-}
-
-h1 {
-    margin: 0;
-    font-size: clamp(44px,7vw,82px);
-    line-height: .94;
-    letter-spacing: -4px;
-}
-
-.gradient {
-    background: linear-gradient(90deg,#fff,#a6a4ff,#65e5ff);
-    background-clip: text;
-    -webkit-background-clip: text;
-    color: transparent;
-}
-
-.subtitle {
-    color: #858fa8;
-    line-height: 1.7;
-    font-size: 17px;
-    max-width: 700px;
-    margin-top: 24px;
-}
-
-.panel {
-    padding: 27px;
-    border-radius: 27px;
-    border: 1px solid rgba(255,255,255,.08);
-    background: rgba(14,18,28,.78);
-    box-shadow: 0 30px 100px rgba(0,0,0,.35);
-    backdrop-filter: blur(20px);
-}
-
-.panel-header {
-    display: flex;
-    justify-content: space-between;
-    gap: 20px;
-    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    font-size: 20px;
     margin-bottom: 22px;
 }
 
-.panel-title {
-    font-weight: 900;
-    font-size: 18px;
+h1 {
+    margin: 0 0 10px;
+    font-size: 30px;
 }
 
-.panel-description {
-    color: #68738b;
-    font-size: 12px;
-    margin-top: 5px;
+p {
+    color: #a1a1aa;
+    line-height: 1.6;
 }
 
-.consent-box {
-    padding: 20px;
-    border-radius: 18px;
-    border: 1px solid rgba(255,255,255,.07);
-    background: rgba(0,0,0,.18);
-    line-height: 1.7;
-    color: #8791a8;
-    font-size: 13px;
+.notice {
+    margin-top: 22px;
+    padding: 18px;
+    border: 1px solid #3f3f46;
+    border-radius: 13px;
+    background: #18181b;
 }
 
-.consent-title {
-    color: #f2f4ff;
-    font-weight: 800;
-    margin-bottom: 7px;
-}
-
-.consent-actions {
+.checkbox {
     display: flex;
-    gap: 11px;
-    margin-top: 20px;
+    gap: 12px;
+    align-items: flex-start;
+}
+
+.checkbox input {
+    width: 20px;
+    height: 20px;
+    margin-top: 2px;
 }
 
 button {
+    width: 100%;
+    margin-top: 22px;
+    padding: 15px;
     border: 0;
+    border-radius: 12px;
+    background: #f4f4f5;
+    color: #09090b;
+    font-weight: bold;
     cursor: pointer;
-    color: white;
-    padding: 14px 20px;
-    border-radius: 14px;
-    font-weight: 900;
-    letter-spacing: 1px;
-    background: linear-gradient(135deg,#765cff,#28cbea);
-    box-shadow: 0 14px 35px rgba(72,80,255,.2);
+    font-size: 15px;
 }
 
-button.secondary {
-    background: rgba(255,255,255,.05);
-    border: 1px solid rgba(255,255,255,.08);
-    box-shadow: none;
+button:disabled {
+    opacity: .4;
+    cursor: not-allowed;
 }
 
-button.danger {
-    background: rgba(255,70,100,.1);
-    border: 1px solid rgba(255,70,100,.2);
-    box-shadow: none;
+.status {
+    margin-top: 20px;
+    padding: 15px;
+    border-radius: 12px;
+    background: #18181b;
+    color: #a1a1aa;
+    display: none;
 }
 
-.status-box {
+.data {
     margin-top: 18px;
     display: none;
-    padding: 15px;
-    border-radius: 15px;
-    background: rgba(255,255,255,.035);
-    color: #9ca6bc;
+}
+
+.row {
+    padding: 12px 0;
+    border-bottom: 1px solid #27272a;
+}
+
+.label {
+    color: #71717a;
     font-size: 12px;
+    text-transform: uppercase;
 }
 
-.status-box.visible {
-    display: block;
-}
-
-.stats {
-    margin-top: 18px;
-    display: grid;
-    grid-template-columns: repeat(5,1fr);
-    gap: 11px;
-}
-
-.stat {
-    border-radius: 19px;
-    border: 1px solid rgba(255,255,255,.07);
-    background: rgba(255,255,255,.025);
-    padding: 18px;
-}
-
-.stat-label {
-    color: #69748d;
-    font-size: 9px;
-    font-weight: 900;
-    letter-spacing: 2px;
-}
-
-.stat-value {
-    margin-top: 9px;
-    font-size: 25px;
-    font-weight: 900;
-}
-
-.history-panel {
-    margin-top: 18px;
-}
-
-.history-tools {
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
-}
-
-.search {
-    min-width: 230px;
-    flex: 1;
-    border: 1px solid rgba(255,255,255,.08);
-    background: rgba(0,0,0,.2);
-    color: white;
-    padding: 13px 15px;
-    border-radius: 13px;
-    outline: none;
-}
-
-.history-list {
-    margin-top: 20px;
-}
-
-.history-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 20px;
-    padding: 18px 0;
-    border-bottom: 1px solid rgba(255,255,255,.055);
-}
-
-.history-item:last-child {
-    border-bottom: 0;
-}
-
-.history-date {
-    color: #68738d;
-    font-size: 10px;
-    letter-spacing: 1px;
-}
-
-.history-ip {
-    margin-top: 7px;
-    font-size: 17px;
-    font-weight: 900;
-}
-
-.history-location {
-    margin-top: 6px;
-    color: #7e89a2;
-    font-size: 12px;
-}
-
-.history-location span {
-    padding: 0 6px;
-    color: #515c74;
-}
-
-.history-coordinates {
-    display: flex;
-    gap: 9px;
-    align-items: center;
-}
-
-.history-coordinates > div {
-    min-width: 88px;
-    padding: 9px 11px;
-    border-radius: 11px;
-    background: rgba(255,255,255,.025);
-}
-
-.history-coordinates span {
-    display: block;
-    color: #59647b;
-    font-size: 8px;
-    letter-spacing: 1px;
-    font-weight: 900;
-}
-
-.history-coordinates strong {
-    display: block;
+.value {
     margin-top: 4px;
-    font-size: 10px;
+    word-break: break-all;
 }
 
-.small-button {
-    display: inline-flex;
-    align-items: center;
-    text-decoration: none;
-    color: white;
-    padding: 10px 12px;
-    border-radius: 11px;
-    background: rgba(115,92,255,.14);
-    border: 1px solid rgba(115,92,255,.2);
-    font-size: 9px;
-    font-weight: 900;
-}
-
-.empty {
-    text-align: center;
-    padding: 60px 20px;
-    border: 1px dashed rgba(255,255,255,.08);
-    border-radius: 20px;
-}
-
-.empty-symbol {
-    font-size: 35px;
-    color: #6873ff;
-}
-
-.empty-title {
-    margin-top: 13px;
-    font-weight: 900;
-}
-
-.empty-text {
-    color: #69748d;
-    margin-top: 6px;
+.small {
     font-size: 12px;
-}
-
-footer {
-    border-top: 1px solid rgba(255,255,255,.06);
-    padding: 28px 0;
-    text-align: center;
-    color: #555f76;
-    font-size: 10px;
-}
-
-@media(max-width:850px) {
-    .stats {
-        grid-template-columns: repeat(2,1fr);
-    }
-
-    .history-item {
-        align-items: flex-start;
-        flex-direction: column;
-    }
-
-    .history-coordinates {
-        width: 100%;
-        flex-wrap: wrap;
-    }
-}
-
-@media(max-width:600px) {
-    .container {
-        width: min(100% - 20px,1200px);
-    }
-
-    nav {
-        height: 70px;
-    }
-
-    .nav-info .badge:first-child {
-        display: none;
-    }
-
-    main {
-        padding-top: 42px;
-    }
-
-    h1 {
-        letter-spacing: -2px;
-    }
-
-    .panel {
-        padding: 19px;
-    }
-
-    .panel-header {
-        align-items: flex-start;
-        flex-direction: column;
-    }
-
-    .consent-actions {
-        flex-direction: column;
-    }
-
-    button {
-        width: 100%;
-    }
+    color: #71717a;
+    margin-top: 18px;
 }
 </style>
 </head>
@@ -970,778 +438,560 @@ footer {
 
 <div class="container">
 
-<nav>
-    <div class="logo">
-        <div class="logo-mark">◈</div>
-        <span>PUGILAIN</span>
-    </div>
+<div class="card">
 
-    <div class="nav-info">
-        <div class="badge">LOCAL GEO</div>
-        <div class="badge online">● ONLINE</div>
-    </div>
-</nav>
+<div class="logo">PG</div>
 
-<main>
+<h1>Accesso</h1>
 
-<section class="hero">
-    <div class="kicker">LOCAL PRIVACY CONSOLE</div>
-    <h1>
-        <span class="gradient">Geolocation</span><br>
-        con consenso.
-    </h1>
-    <div class="subtitle">
-        Console locale per richieste di geolocalizzazione autorizzate,
-        con dashboard, statistiche e storico persistente sul computer.
-    </div>
-</section>
+<p>
+Prima di continuare, leggi l'informativa e scegli esplicitamente
+se vuoi autorizzare la sessione.
+</p>
 
-<section class="panel">
+<div class="notice">
 
-<div class="panel-header">
-    <div>
-        <div class="panel-title">Richiesta posizione</div>
-        <div class="panel-description">
-            Il browser mostrerà la propria finestra di autorizzazione.
-        </div>
-    </div>
+<label class="checkbox">
 
-    <div class="badge">CONSENSO OBBLIGATORIO</div>
+<input type="checkbox" id="consent">
+
+<span>
+Acconsento alla registrazione di questa sessione per lo scopo
+dichiarato nella pagina.
+</span>
+
+</label>
+
 </div>
 
-<div class="consent-box">
-    <div class="consent-title">Prima di continuare</div>
+<button id="continue" disabled>
+CONSENTI E CONTINUA
+</button>
 
-    La posizione del dispositivo verrà richiesta tramite la normale
-    autorizzazione del browser. Se l'utente rifiuta, nessuna posizione
-    GPS viene inviata. Se accetta, i dati della richiesta vengono mostrati
-    nella console locale e possono essere mantenuti nello storico locale.
+<div class="status" id="status"></div>
+
+<div class="data" id="data">
+
+<div class="row">
+<div class="label">Sessione</div>
+<div class="value" id="session"></div>
 </div>
 
-<div class="consent-actions">
-    <button onclick="requestLocation()">CONSENTI E CONTINUA</button>
-    <button class="secondary" onclick="loadHistory()">AGGIORNA STORICO</button>
+<div class="row">
+<div class="label">Stato</div>
+<div class="value" id="state"></div>
 </div>
 
-<div id="status" class="status-box"></div>
-
-</section>
-
-<section class="stats">
-
-<div class="stat">
-    <div class="stat-label">RICHIESTE</div>
-    <div class="stat-value" id="requests">0</div>
-</div>
-
-<div class="stat">
-    <div class="stat-label">CONSENSI</div>
-    <div class="stat-value" id="accepted">0</div>
-</div>
-
-<div class="stat">
-    <div class="stat-label">RIFIUTI</div>
-    <div class="stat-value" id="rejected">0</div>
-</div>
-
-<div class="stat">
-    <div class="stat-label">STORICO</div>
-    <div class="stat-value" id="historyCount">0</div>
-</div>
-
-<div class="stat">
-    <div class="stat-label">UPTIME</div>
-    <div class="stat-value" id="uptime">0s</div>
-</div>
-
-</section>
-
-<section class="panel history-panel">
-
-<div class="panel-header">
-
-<div>
-    <div class="panel-title">History</div>
-    <div class="panel-description">
-        Storico salvato esclusivamente nella directory locale dell'applicazione.
-    </div>
-</div>
-
-<div class="history-tools">
-    <input
-        id="search"
-        class="search"
-        type="text"
-        placeholder="Cerca IP, città o paese..."
-        oninput="filterHistory()"
-    >
-
-    <button class="secondary" onclick="exportHistory()">ESPORTA</button>
-
-    <button class="danger" onclick="clearHistory()">SVUOTA</button>
+<div class="row">
+<div class="label">Precisione posizione</div>
+<div class="value" id="accuracy"></div>
 </div>
 
 </div>
 
-<div id="history" class="history-list"></div>
+<div class="small">
+La sessione utilizza un identificatore casuale separato.
+</div>
 
-</section>
-
-</main>
-
-<footer>
-    PUGILAIN LOCAL GEO · VERSION 4.0 · LOCALHOST ONLY
-</footer>
+</div>
 
 </div>
 
 <script>
-let historyData = [];
 
-function showStatus(message) {
-    const element = document.getElementById("status");
-    element.textContent = message;
-    element.classList.add("visible");
+const params = new URLSearchParams(window.location.search);
+
+let token = params.get("token");
+
+if (!token) {
+    token = crypto.randomUUID();
 }
 
-function requestLocation() {
-    if (!navigator.geolocation) {
-        showStatus("Questo browser non supporta la geolocalizzazione.");
+const consent = document.getElementById("consent");
+const button = document.getElementById("continue");
+const statusBox = document.getElementById("status");
+const dataBox = document.getElementById("data");
+
+document.getElementById("session").textContent = token;
+
+consent.addEventListener("change", function() {
+    button.disabled = !consent.checked;
+});
+
+function showStatus(text) {
+    statusBox.style.display = "block";
+    statusBox.textContent = text;
+}
+
+async function sendEvent(type, extra = {}) {
+
+    const endpoint = "/api/event";
+
+    const payload = {
+        token: token,
+        event: {
+            type: type,
+            ...extra
+        }
+    };
+
+    try {
+
+        const response = await fetch(endpoint, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify(payload)
+        });
+
+        return await response.json();
+
+    } catch (error) {
+
+        return {
+            ok: false,
+            error: "backend_unavailable"
+        };
+
+    }
+}
+
+button.addEventListener("click", async function() {
+
+    if (!consent.checked) {
         return;
     }
 
-    showStatus("Richiesta del consenso in corso...");
+    button.disabled = true;
+
+    showStatus("Registrazione del consenso...");
+
+    await sendEvent("consent", {
+        consent: true
+    });
+
+    await sendEvent("session_started");
+
+    dataBox.style.display = "block";
+
+    document.getElementById("state").textContent =
+        "Sessione autorizzata";
+
+    if (!navigator.geolocation) {
+
+        showStatus(
+            "La geolocalizzazione non è disponibile in questo browser."
+        );
+
+        return;
+    }
+
+    showStatus(
+        "Sessione autorizzata. Se richiesto, puoi concedere la posizione al browser."
+    );
 
     navigator.geolocation.getCurrentPosition(
-        function(position) {
-            const latitude = position.coords.latitude;
-            const longitude = position.coords.longitude;
-            const accuracy = position.coords.accuracy;
 
-            showStatus("Consenso ricevuto. Invio della posizione al server locale...");
+        async function(position) {
 
-            fetch("/api/collect", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    consent: true,
-                    latitude: latitude,
-                    longitude: longitude,
-                    accuracy: accuracy
-                })
-            })
-            .then(function(response) {
-                return response.json();
-            })
-            .then(function(data) {
-                if (!data.success) {
-                    showStatus(data.error || "Errore durante la richiesta.");
-                    return;
-                }
+            const accuracy = Math.round(
+                position.coords.accuracy
+            );
 
-                showStatus(
-                    "Posizione ricevuta. Record aggiunto allo storico locale."
-                );
+            document.getElementById("accuracy").textContent =
+                accuracy + " metri";
 
-                loadHistory();
-            })
-            .catch(function() {
-                showStatus("Impossibile comunicare con il server locale.");
+            await sendEvent("location_available", {
+                location_available: true,
+                accuracy_meters: accuracy
             });
-        },
-        function(error) {
-            if (error.code === 1) {
-                showStatus("Posizione rifiutata dall'utente.");
-            } else if (error.code === 2) {
-                showStatus("Posizione non disponibile.");
-            } else if (error.code === 3) {
-                showStatus("Richiesta di posizione scaduta.");
-            } else {
-                showStatus("Richiesta di posizione non riuscita.");
-            }
 
-            fetch("/api/rejected", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    consent: false
-                })
-            })
-            .then(function() {
-                loadHistory();
-            })
-            .catch(function() {});
+            showStatus(
+                "Sessione completata."
+            );
+
         },
+
+        async function() {
+
+            document.getElementById("state").textContent =
+                "Sessione autorizzata senza posizione";
+
+            await sendEvent("location_available", {
+                location_available: false
+            });
+
+            showStatus(
+                "Hai autorizzato la sessione, ma la posizione non è stata fornita."
+            );
+
+        },
+
         {
             enableHighAccuracy: true,
             timeout: 15000,
             maximumAge: 0
         }
-    );
-}
 
-function loadHistory() {
-    fetch("/api/history")
-        .then(function(response) {
-            return response.json();
-        })
-        .then(function(data) {
-            historyData = data.history || [];
-            renderHistory(historyData);
-            updateStats();
-        })
-        .catch(function() {
-            showStatus("Impossibile caricare lo storico.");
-        });
-}
-
-function updateStats() {
-    fetch("/api/stats")
-        .then(function(response) {
-            return response.json();
-        })
-        .then(function(data) {
-            document.getElementById("requests").textContent = data.requests;
-            document.getElementById("accepted").textContent = data.accepted;
-            document.getElementById("rejected").textContent = data.rejected;
-            document.getElementById("historyCount").textContent = data.history;
-            document.getElementById("uptime").textContent = formatUptime(data.uptime);
-        })
-        .catch(function() {});
-}
-
-function formatUptime(seconds) {
-    seconds = Number(seconds) || 0;
-
-    const days = Math.floor(seconds / 86400);
-    seconds %= 86400;
-
-    const hours = Math.floor(seconds / 3600);
-    seconds %= 3600;
-
-    const minutes = Math.floor(seconds / 60);
-    seconds %= 60;
-
-    let output = "";
-
-    if (days) {
-        output += days + "d ";
-    }
-
-    if (hours) {
-        output += hours + "h ";
-    }
-
-    if (minutes) {
-        output += minutes + "m ";
-    }
-
-    output += seconds + "s";
-
-    return output;
-}
-
-function escapeHtml(value) {
-    const element = document.createElement("div");
-    element.textContent = value == null ? "" : String(value);
-    return element.innerHTML;
-}
-
-function renderHistory(items) {
-    const container = document.getElementById("history");
-
-    if (!items.length) {
-        container.innerHTML = `
-            <div class="empty">
-                <div class="empty-symbol">◎</div>
-                <div class="empty-title">Nessun dato nello storico</div>
-                <div class="empty-text">
-                    Le richieste autorizzate appariranno qui.
-                </div>
-            </div>
-        `;
-
-        return;
-    }
-
-    container.innerHTML = items.map(function(item) {
-        const date = new Date(item.timestamp).toLocaleString();
-
-        const latitude = Number(item.latitude).toFixed(6);
-        const longitude = Number(item.longitude).toFixed(6);
-
-        const map =
-            "https://www.openstreetmap.org/?mlat=" +
-            encodeURIComponent(item.latitude) +
-            "&mlon=" +
-            encodeURIComponent(item.longitude);
-
-        return `
-            <div class="history-item">
-                <div class="history-main">
-                    <div class="history-date">
-                        ${escapeHtml(date)}
-                    </div>
-
-                    <div class="history-ip">
-                        ${escapeHtml(item.ip)}
-                    </div>
-
-                    <div class="history-location">
-                        ${escapeHtml(item.city || "Posizione GPS")}
-                        <span>•</span>
-                        ${escapeHtml(item.country || "—")}
-                    </div>
-                </div>
-
-                <div class="history-coordinates">
-                    <div>
-                        <span>LAT</span>
-                        <strong>${escapeHtml(latitude)}</strong>
-                    </div>
-
-                    <div>
-                        <span>LON</span>
-                        <strong>${escapeHtml(longitude)}</strong>
-                    </div>
-
-                    <div>
-                        <span>ACC</span>
-                        <strong>${escapeHtml(item.accuracy || "—")} m</strong>
-                    </div>
-
-                    <a
-                        class="small-button"
-                        href="${escapeHtml(map)}"
-                        target="_blank"
-                        rel="noreferrer"
-                    >
-                        MAPPA
-                    </a>
-                </div>
-            </div>
-        `;
-    }).join("");
-}
-
-function filterHistory() {
-    const query =
-        document.getElementById("search").value
-        .toLowerCase()
-        .trim();
-
-    if (!query) {
-        renderHistory(historyData);
-        return;
-    }
-
-    const filtered = historyData.filter(function(item) {
-        const values = [
-            item.ip,
-            item.city,
-            item.country,
-            item.country_code,
-            item.region,
-            item.postal,
-            item.latitude,
-            item.longitude
-        ];
-
-        return values.some(function(value) {
-            return String(value || "")
-                .toLowerCase()
-                .includes(query);
-        });
-    });
-
-    renderHistory(filtered);
-}
-
-function exportHistory() {
-    fetch("/api/export")
-        .then(function(response) {
-            return response.json();
-        })
-        .then(function(data) {
-            const blob = new Blob(
-                [JSON.stringify(data, null, 2)],
-                {
-                    type: "application/json"
-                }
-            );
-
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement("a");
-
-            link.href = url;
-            link.download = "pugilain-history.json";
-            link.click();
-
-            URL.revokeObjectURL(url);
-        })
-        .catch(function() {
-            showStatus("Esportazione non riuscita.");
-        });
-}
-
-function clearHistory() {
-    const confirmed = confirm(
-        "Vuoi eliminare definitivamente lo storico locale?"
     );
 
-    if (!confirmed) {
-        return;
-    }
+});
 
-    fetch("/api/history", {
-        method: "DELETE"
-    })
-    .then(function(response) {
-        return response.json();
-    })
-    .then(function(data) {
-        if (data.success) {
-            historyData = [];
-            renderHistory([]);
-            loadHistory();
-            showStatus("Storico eliminato.");
-        }
-    })
-    .catch(function() {
-        showStatus("Impossibile eliminare lo storico.");
-    });
-}
+sendEvent("page_opened");
 
-loadHistory();
-
-setInterval(function() {
-    loadHistory();
-}, 5000);
 </script>
 
 </body>
 </html>
-"""
+'''
+
+    path = os.path.join(PUBLIC_DIR, "index.html")
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+    return path
 
 
-class Handler(BaseHTTPRequestHandler):
+DASHBOARD_HTML = r'''<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Pugilain Geo Local</title>
 
-    def log_message(self, format_string, *args):
-        return
+<style>
+* {
+    box-sizing: border-box;
+}
 
-    def do_OPTIONS(self):
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:5000")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
+body {
+    margin: 0;
+    background: #09090b;
+    color: #f4f4f5;
+    font-family: Arial, Helvetica, sans-serif;
+}
 
-    def do_GET(self):
-        parsed = urlparse(self.path)
-        path = parsed.path
+header {
+    padding: 25px;
+    border-bottom: 1px solid #27272a;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
 
-        if path == "/":
-            html_send(self, render_dashboard())
-            return
+h1 {
+    margin: 0;
+    font-size: 22px;
+}
 
-        if path == "/api/stats":
-            json_send(self, statistics())
-            return
+main {
+    padding: 25px;
+    max-width: 1200px;
+    margin: auto;
+}
 
-        if path == "/api/history":
-            history = load_history()
-            json_send(self, {
-                "success": True,
-                "history": history
-            })
-            return
+.stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 15px;
+    margin-bottom: 25px;
+}
 
-        if path == "/api/export":
-            history = load_history()
+.stat {
+    padding: 20px;
+    background: #111113;
+    border: 1px solid #27272a;
+    border-radius: 14px;
+}
 
-            json_send(self, {
-                "success": True,
-                "exported_at": now_iso(),
-                "count": len(history),
-                "history": history
-            })
+.stat-number {
+    font-size: 28px;
+    font-weight: bold;
+}
 
-            return
+.stat-label {
+    color: #71717a;
+    margin-top: 5px;
+}
 
-        if path == "/api/instance":
-            instance = initialize_instance()
+.panel {
+    background: #111113;
+    border: 1px solid #27272a;
+    border-radius: 14px;
+    overflow: hidden;
+}
 
-            json_send(self, {
-                "success": True,
-                "instance": instance
-            })
+.panel-head {
+    padding: 18px;
+    border-bottom: 1px solid #27272a;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
 
-            return
+button {
+    border: 0;
+    border-radius: 9px;
+    padding: 9px 13px;
+    cursor: pointer;
+}
 
-        if path == "/favicon.ico":
-            self.send_response(204)
-            self.end_headers()
-            return
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
 
-        json_send(
-            self,
-            {
-                "success": False,
-                "error": "Endpoint non trovato."
-            },
-            404
-        )
+th,
+td {
+    text-align: left;
+    padding: 14px;
+    border-bottom: 1px solid #27272a;
+}
 
-    def do_POST(self):
-        parsed = urlparse(self.path)
-        path = parsed.path
+th {
+    color: #71717a;
+    font-size: 12px;
+    text-transform: uppercase;
+}
 
-        if path == "/api/rejected":
-            update_state("rejected")
-            json_send(self, {
-                "success": True
-            })
-            return
+code {
+    color: #d4d4d8;
+    word-break: break-all;
+}
 
-        if path != "/api/collect":
-            json_send(
-                self,
-                {
-                    "success": False,
-                    "error": "Endpoint non trovato."
-                },
-                404
-            )
-            return
+@media(max-width:700px) {
+    .stats {
+        grid-template-columns: 1fr;
+    }
 
-        update_state("requests")
+    table {
+        font-size: 12px;
+    }
 
-        payload = read_json(self)
+    th:nth-child(3),
+    td:nth-child(3) {
+        display: none;
+    }
+}
+</style>
+</head>
 
-        if not payload.get("consent"):
-            update_state("rejected")
+<body>
 
-            json_send(
-                self,
-                {
-                    "success": False,
-                    "error": "Consenso richiesto."
-                },
-                403
-            )
+<header>
+<h1>Pugilain Geo · Local</h1>
+<div id="connection">ONLINE</div>
+</header>
 
-            return
+<main>
 
-        latitude = payload.get("latitude")
-        longitude = payload.get("longitude")
-        accuracy = payload.get("accuracy")
+<div class="stats">
 
-        if not is_valid_coordinate(latitude, longitude):
-            update_state("errors")
+<div class="stat">
+<div class="stat-number" id="sessions">0</div>
+<div class="stat-label">Sessioni</div>
+</div>
 
-            json_send(
-                self,
-                {
-                    "success": False,
-                    "error": "Coordinate non valide."
-                },
-                400
-            )
+<div class="stat">
+<div class="stat-number" id="events">0</div>
+<div class="stat-label">Eventi</div>
+</div>
 
-            return
+<div class="stat">
+<div class="stat-number" id="active">0</div>
+<div class="stat-label">Sessioni attive</div>
+</div>
 
-        ip = get_ip_from_request(self)
+</div>
 
-        ip_info = get_ip_information(ip)
+<div class="panel">
 
-        if not ip_info.get("success"):
-            ip_info = {
-                "country": "",
-                "country_code": "",
-                "region": "",
-                "city": "",
-                "postal": "",
-                "timezone": ""
-            }
+<div class="panel-head">
+<strong>Eventi recenti</strong>
+<button onclick="loadData()">Aggiorna</button>
+</div>
 
-        entry = make_entry(
-            ip,
-            latitude,
-            longitude,
-            accuracy,
-            ip_info
-        )
+<table>
 
-        append_history(entry)
-        update_state("accepted")
+<thead>
 
-        json_send(
-            self,
-            {
-                "success": True,
-                "entry": entry
-            }
-        )
+<tr>
+<th>Ora</th>
+<th>Token</th>
+<th>Evento</th>
+<th>Dati</th>
+</tr>
 
-    def do_DELETE(self):
-        parsed = urlparse(self.path)
-        path = parsed.path
+</thead>
 
-        if path != "/api/history":
-            json_send(
-                self,
-                {
-                    "success": False,
-                    "error": "Endpoint non trovato."
-                },
-                404
-            )
+<tbody id="rows"></tbody>
 
-            return
+</table>
 
-        delete_history()
+</div>
 
-        json_send(
-            self,
-            {
-                "success": True,
-                "message": "Storico eliminato."
-            }
-        )
+</main>
+
+<script>
+
+async function loadData() {
+
+    try {
+
+        const stats = await fetch(
+            "/api/stats",
+            {cache: "no-store"}
+        ).then(r => r.json());
+
+        document.getElementById("sessions").textContent =
+            stats.sessions;
+
+        document.getElementById("events").textContent =
+            stats.events;
+
+        document.getElementById("active").textContent =
+            stats.active_sessions;
+
+        const data = await fetch(
+            "/api/history",
+            {cache: "no-store"}
+        ).then(r => r.json());
+
+        const rows = document.getElementById("rows");
+
+        rows.innerHTML = "";
+
+        const list = [...data.history].reverse();
+
+        for (const item of list) {
+
+            const tr = document.createElement("tr");
+
+            const date = new Date(
+                item.timestamp
+            ).toLocaleString();
+
+            const details =
+                JSON.stringify(item.event);
+
+            tr.innerHTML =
+                "<td>" + date + "</td>" +
+                "<td><code>" +
+                escapeHtml(item.token) +
+                "</code></td>" +
+                "<td>" +
+                escapeHtml(item.event.type || "") +
+                "</td>" +
+                "<td><code>" +
+                escapeHtml(details) +
+                "</code></td>";
+
+            rows.appendChild(tr);
+        }
+
+    } catch(error) {
+
+        document.getElementById(
+            "connection"
+        ).textContent = "OFFLINE";
+
+    }
+
+}
+
+function escapeHtml(value) {
+
+    return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+
+}
+
+loadData();
+
+setInterval(
+    loadData,
+    3000
+);
+
+</script>
+
+</body>
+</html>
+'''
 
 
-def start_server():
-    server = HTTPServer(
-        (HOST, PORT),
-        Handler
-    )
+def print_banner():
 
     print()
-    print("╭──────────────────────────────────────────────────────────────╮")
-    print("│ SERVER                                                        │")
-    print("├──────────────────────────────────────────────────────────────┤")
-    print("│ Host        127.0.0.1                                        │")
-    print("│ Port        5000                                             │")
-    print("│ Mode        LOCAL                                            │")
-    print("│ History     ENABLED                                          │")
-    print("╰──────────────────────────────────────────────────────────────╯")
+    print("==============================================")
+    print("          PUGILAIN GEO LOCAL")
+    print("==============================================")
     print()
-
-    return server
-
-
-def open_browser():
-    url = f"http://{HOST}:{PORT}/"
-
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass
-
-
-def show_console_info(instance, key):
+    print("Cartella:")
+    print(BASE_DIR)
     print()
-    print("┌──────────────────────────────────────────────────────────────┐")
-    print("│ INSTANCE                                                     │")
-    print("├──────────────────────────────────────────────────────────────┤")
-    print("│ ID                                                           │")
-    print("│ " + instance["instance_id"])
-    print("│                                                              │")
-    print("│ KEY                                                          │")
-    print("│ " + key)
-    print("│                                                              │")
-    print("│ HISTORY                                                      │")
-    print("│ " + HISTORY_FILE)
-    print("└──────────────────────────────────────────────────────────────┘")
+    print("Cartella Netlify:")
+    print(PUBLIC_DIR)
+    print()
+    print("Index:")
+    print(os.path.join(PUBLIC_DIR, "index.html"))
+    print()
+    print("Pannello locale:")
+    print("http://127.0.0.1:5000")
+    print()
+    print("Cronologia:")
+    print(HISTORY_FILE)
+    print()
+    print("Token:")
+    print(TOKENS_FILE)
+    print()
+    print("==============================================")
     print()
 
 
 def run_server():
-    instance = initialize_instance()
-    key = initialize_key()
-    initialize_config()
-    initialize_history()
 
-    clear()
-    banner()
+    server = ThreadingHTTPServer(
+        (HOST, PORT),
+        LocalHandler
+    )
 
-    loading("Inizializzazione", 1.0)
-    loading("Caricamento configurazione", 0.8)
-    loading("Preparazione storico locale", 0.8)
-
-    show_console_info(instance, key)
-
-    server = start_server()
-
-    open_browser()
-
-    print("Dashboard aperta.")
-    print("Premi CTRL+C per arrestare il server.")
-    print()
+    print_banner()
 
     try:
-        server.serve_forever()
+        webbrowser.open(
+            "http://127.0.0.1:5000"
+        )
+    except Exception:
+        pass
 
-    except KeyboardInterrupt:
-        print()
-        print("Arresto del server...")
+    print(
+        "Server avviato su "
+        + HOST
+        + ":"
+        + str(PORT)
+    )
 
-    finally:
-        server.server_close()
-        print("Server arrestato.")
+    print(
+        "CTRL+C per terminare."
+    )
 
-
-def main():
-    ensure_directory()
-
-    if len(sys.argv) > 1:
-        command = sys.argv[1].lower()
-
-        if command == "reset":
-            instance, key = reset_instance()
-
-            print()
-            print("Istanza resettata.")
-            print("Instance ID:", instance["instance_id"])
-            print("Nuova key:", key)
-            print()
-
-            return
-
-        if command == "clear":
-            delete_history()
-
-            print()
-            print("Storico eliminato.")
-            print()
-
-            return
-
-        if command == "info":
-            instance = initialize_instance()
-            key = initialize_key()
-            config = initialize_config()
-            history = initialize_history()
-
-            print()
-            print("APP:", APP_NAME)
-            print("VERSION:", VERSION)
-            print("HOST:", HOST)
-            print("PORT:", PORT)
-            print("INSTANCE:", instance["instance_id"])
-            print("HISTORY:", len(history))
-            print("DIRECTORY:", BASE_DIR)
-            print("KEY:", key)
-            print()
-
-            return
-
-    run_server()
+    server.serve_forever()
 
 
 if __name__ == "__main__":
-    main()
+
+    index_path = create_netlify_index()
+
+    print()
+    print("FILE NETLIFY CREATO:")
+    print(index_path)
+    print()
+
+    run_server()
