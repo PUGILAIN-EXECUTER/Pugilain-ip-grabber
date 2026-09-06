@@ -1,496 +1,526 @@
 import os
 import json
-import uuid
-import time
 import secrets
-import threading
-import webbrowser
 from datetime import datetime, timezone
-from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse
 
-HOST = "127.0.0.1"
-PORT = 5000
-
-BASE_DIR = os.path.join(os.path.expanduser("~"), "Desktop", "PugilainGeo")
-PUBLIC_DIR = os.path.join(BASE_DIR, "netlify")
-HISTORY_FILE = os.path.join(BASE_DIR, "history.json")
-TOKENS_FILE = os.path.join(BASE_DIR, "tokens.json")
-CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
-
-os.makedirs(BASE_DIR, exist_ok=True)
-os.makedirs(PUBLIC_DIR, exist_ok=True)
-
-
-def load_json(path, default):
-    if not os.path.exists(path):
-        return default
-
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
-
-
-def save_json(path, data):
-    temp = path + ".tmp"
-
-    with open(temp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-    os.replace(temp, path)
-
-
-history = load_json(HISTORY_FILE, [])
-tokens = load_json(TOKENS_FILE, {})
-
-config = load_json(
-    CONFIG_FILE,
-    {
-        "name": "Pugilain Geo",
-        "version": "1.0",
-        "port": PORT,
-        "created": datetime.now(timezone.utc).isoformat()
-    }
+BASE_DIR = os.path.join(
+    os.path.expanduser("~"),
+    "Desktop",
+    "PugilainNetlify"
 )
 
-save_json(CONFIG_FILE, config)
+FUNCTION_DIR = os.path.join(
+    BASE_DIR,
+    "netlify",
+    "functions"
+)
+
+os.makedirs(FUNCTION_DIR, exist_ok=True)
+
+TOKEN = secrets.token_urlsafe(32)
+
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+HISTORY_FILE = os.path.join(BASE_DIR, "history.json")
+INDEX_FILE = os.path.join(BASE_DIR, "index.html")
+TOML_FILE = os.path.join(BASE_DIR, "netlify.toml")
+FUNCTION_FILE = os.path.join(FUNCTION_DIR, "event.js")
 
 
-def create_token():
-    token = secrets.token_urlsafe(32)
-
-    tokens[token] = {
-        "created": datetime.now(timezone.utc).isoformat(),
-        "events": 0,
-        "active": True
-    }
-
-    save_json(TOKENS_FILE, tokens)
-
-    return token
+def save(path, content):
+    with open(path, "w", encoding="utf-8") as file:
+        file.write(content)
 
 
-def add_event(token, event):
-    if token not in tokens:
-        return False
+config = {
+    "project": "PugilainNetlify",
+    "token": TOKEN,
+    "created": datetime.now(timezone.utc).isoformat()
+}
 
-    record = {
-        "id": uuid.uuid4().hex,
-        "token": token,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "event": event
-    }
+save(
+    CONFIG_FILE,
+    json.dumps(config, indent=2, ensure_ascii=False)
+)
 
-    history.append(record)
-
-    tokens[token]["events"] = tokens[token].get("events", 0) + 1
-
-    save_json(HISTORY_FILE, history)
-    save_json(TOKENS_FILE, tokens)
-
-    return True
+save(
+    HISTORY_FILE,
+    "[]"
+)
 
 
-def json_response(handler, data, status=200):
-    raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
-
-    handler.send_response(status)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Content-Length", str(len(raw)))
-    handler.send_header("Cache-Control", "no-store")
-    handler.send_header("Access-Control-Allow-Origin", "*")
-    handler.send_header("Access-Control-Allow-Headers", "Content-Type")
-    handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-    handler.end_headers()
-
-    handler.wfile.write(raw)
-
-
-class LocalHandler(BaseHTTPRequestHandler):
-
-    def log_message(self, format, *args):
-        print("[LOCAL]", format % args)
-
-    def do_OPTIONS(self):
-        json_response(self, {"ok": True})
-
-    def do_GET(self):
-        parsed = urlparse(self.path)
-
-        if parsed.path == "/":
-            html = DASHBOARD_HTML.encode("utf-8")
-
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(html)))
-            self.end_headers()
-
-            self.wfile.write(html)
-            return
-
-        if parsed.path == "/api/history":
-            json_response(
-                self,
-                {
-                    "ok": True,
-                    "count": len(history),
-                    "history": history
-                }
-            )
-            return
-
-        if parsed.path == "/api/tokens":
-            safe_tokens = {}
-
-            for token, data in tokens.items():
-                safe_tokens[token] = {
-                    "created": data.get("created"),
-                    "events": data.get("events", 0),
-                    "active": data.get("active", True)
-                }
-
-            json_response(
-                self,
-                {
-                    "ok": True,
-                    "tokens": safe_tokens
-                }
-            )
-            return
-
-        if parsed.path == "/api/stats":
-            json_response(
-                self,
-                {
-                    "ok": True,
-                    "sessions": len(tokens),
-                    "events": len(history),
-                    "active_sessions": sum(
-                        1
-                        for value in tokens.values()
-                        if value.get("active", True)
-                    )
-                }
-            )
-            return
-
-        if parsed.path == "/api/health":
-            json_response(
-                self,
-                {
-                    "ok": True,
-                    "server": "Pugilain Geo",
-                    "time": datetime.now(timezone.utc).isoformat()
-                }
-            )
-            return
-
-        json_response(self, {"ok": False, "error": "Not found"}, 404)
-
-    def do_POST(self):
-        parsed = urlparse(self.path)
-
-        if parsed.path != "/api/event":
-            json_response(self, {"ok": False, "error": "Not found"}, 404)
-            return
-
-        try:
-            size = int(self.headers.get("Content-Length", "0"))
-
-            if size <= 0 or size > 10000:
-                json_response(
-                    self,
-                    {
-                        "ok": False,
-                        "error": "Invalid request size"
-                    },
-                    400
-                )
-                return
-
-            body = self.rfile.read(size)
-            data = json.loads(body.decode("utf-8"))
-
-        except Exception:
-            json_response(
-                self,
-                {
-                    "ok": False,
-                    "error": "Invalid JSON"
-                },
-                400
-            )
-            return
-
-        token = str(data.get("token", "")).strip()
-        event = data.get("event")
-
-        if not token or token not in tokens:
-            json_response(
-                self,
-                {
-                    "ok": False,
-                    "error": "Invalid session token"
-                },
-                403
-            )
-            return
-
-        if not isinstance(event, dict):
-            json_response(
-                self,
-                {
-                    "ok": False,
-                    "error": "Invalid event"
-                },
-                400
-            )
-            return
-
-        event_type = str(event.get("type", "")).strip()
-
-        if event_type not in {
-            "consent",
-            "session_started",
-            "page_opened",
-            "location_available"
-        }:
-            json_response(
-                self,
-                {
-                    "ok": False,
-                    "error": "Unsupported event"
-                },
-                400
-            )
-            return
-
-        if not add_event(token, event):
-            json_response(
-                self,
-                {
-                    "ok": False,
-                    "error": "Unable to save event"
-                },
-                500
-            )
-            return
-
-        print()
-        print("========================================")
-        print("NUOVO EVENTO")
-        print("TOKEN:", token)
-        print("TIPO:", event_type)
-        print("ORA:", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        print("========================================")
-        print()
-
-        json_response(
-            self,
-            {
-                "ok": True,
-                "saved": True,
-                "token": token
-            }
-        )
-
-
-def create_netlify_index():
-    html = r'''<!DOCTYPE html>
+index_html = r'''<!DOCTYPE html>
 <html lang="it">
+
 <head>
+
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Pugilain Geo</title>
+
+<meta
+name="viewport"
+content="width=device-width,initial-scale=1.0"
+>
+
+<meta
+name="description"
+content="Pugilain consent session"
+>
+
+<title>Pugilain</title>
 
 <style>
+
 * {
     box-sizing: border-box;
 }
 
+html,
 body {
     margin: 0;
+    width: 100%;
+    min-height: 100%;
+}
+
+body {
     min-height: 100vh;
-    background: #09090b;
+    background:
+        radial-gradient(
+            circle at 50% 0%,
+            #25252b 0%,
+            #111113 35%,
+            #080809 75%
+        );
     color: #f4f4f5;
-    font-family: Arial, Helvetica, sans-serif;
+    font-family:
+        Inter,
+        Arial,
+        Helvetica,
+        sans-serif;
     display: flex;
     justify-content: center;
     align-items: center;
-    padding: 24px;
+    padding: 22px;
+    overflow-x: hidden;
+}
+
+.background {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    overflow: hidden;
+}
+
+.glow {
+    position: absolute;
+    width: 420px;
+    height: 420px;
+    border-radius: 50%;
+    filter: blur(100px);
+    opacity: .18;
+    background: #6366f1;
+    left: 50%;
+    top: -220px;
+    transform: translateX(-50%);
 }
 
 .container {
+    position: relative;
     width: 100%;
     max-width: 680px;
 }
 
 .card {
-    background: #111113;
-    border: 1px solid #27272a;
-    border-radius: 18px;
-    padding: 32px;
-    box-shadow: 0 20px 70px rgba(0,0,0,.4);
+    width: 100%;
+    padding: 34px;
+    border-radius: 24px;
+    border: 1px solid rgba(255,255,255,.09);
+    background: rgba(17,17,19,.88);
+    backdrop-filter: blur(20px);
+    box-shadow:
+        0 35px 100px rgba(0,0,0,.55),
+        inset 0 1px 0 rgba(255,255,255,.04);
+    animation:
+        cardIn .7s ease both;
+}
+
+@keyframes cardIn {
+    from {
+        opacity: 0;
+        transform:
+            translateY(20px)
+            scale(.98);
+    }
+
+    to {
+        opacity: 1;
+        transform:
+            translateY(0)
+            scale(1);
+    }
 }
 
 .logo {
-    width: 54px;
-    height: 54px;
-    border-radius: 15px;
-    background: #27272a;
+    width: 58px;
+    height: 58px;
+    border-radius: 17px;
     display: flex;
-    align-items: center;
     justify-content: center;
-    font-weight: bold;
-    font-size: 20px;
-    margin-bottom: 22px;
+    align-items: center;
+    background:
+        linear-gradient(
+            135deg,
+            #3f3f46,
+            #18181b
+        );
+    border: 1px solid #3f3f46;
+    font-weight: 900;
+    font-size: 18px;
+    letter-spacing: -1px;
+    box-shadow:
+        0 12px 30px rgba(0,0,0,.35);
+    margin-bottom: 24px;
+}
+
+.badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 11px;
+    border-radius: 999px;
+    background: rgba(255,255,255,.05);
+    border: 1px solid rgba(255,255,255,.07);
+    color: #a1a1aa;
+    font-size: 12px;
+    margin-bottom: 16px;
+}
+
+.dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #22c55e;
+    box-shadow: 0 0 12px #22c55e;
 }
 
 h1 {
-    margin: 0 0 10px;
-    font-size: 30px;
+    margin: 0;
+    font-size: 34px;
+    line-height: 1.1;
+    letter-spacing: -1.5px;
 }
 
-p {
+.subtitle {
+    margin-top: 13px;
     color: #a1a1aa;
-    line-height: 1.6;
-}
-
-.notice {
-    margin-top: 22px;
-    padding: 18px;
-    border: 1px solid #3f3f46;
-    border-radius: 13px;
-    background: #18181b;
-}
-
-.checkbox {
-    display: flex;
-    gap: 12px;
-    align-items: flex-start;
-}
-
-.checkbox input {
-    width: 20px;
-    height: 20px;
-    margin-top: 2px;
-}
-
-button {
-    width: 100%;
-    margin-top: 22px;
-    padding: 15px;
-    border: 0;
-    border-radius: 12px;
-    background: #f4f4f5;
-    color: #09090b;
-    font-weight: bold;
-    cursor: pointer;
+    line-height: 1.65;
     font-size: 15px;
 }
 
-button:disabled {
-    opacity: .4;
+.banner {
+    margin-top: 25px;
+    padding: 18px;
+    border-radius: 16px;
+    border: 1px solid #27272a;
+    background: rgba(24,24,27,.85);
+}
+
+.banner-title {
+    font-weight: 800;
+    margin-bottom: 7px;
+}
+
+.banner-text {
+    color: #a1a1aa;
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+.consent {
+    margin-top: 18px;
+    padding: 18px;
+    border-radius: 16px;
+    border: 1px solid #27272a;
+    background: #0d0d0f;
+}
+
+.consent label {
+    display: flex;
+    align-items: flex-start;
+    gap: 13px;
+    cursor: pointer;
+}
+
+.consent input {
+    appearance: none;
+    width: 21px;
+    height: 21px;
+    min-width: 21px;
+    border-radius: 6px;
+    border: 1px solid #52525b;
+    background: #18181b;
+    cursor: pointer;
+    position: relative;
+    margin: 0;
+}
+
+.consent input:checked {
+    background: #f4f4f5;
+    border-color: #f4f4f5;
+}
+
+.consent input:checked::after {
+    content: "";
+    position: absolute;
+    width: 5px;
+    height: 10px;
+    border-right: 2px solid #09090b;
+    border-bottom: 2px solid #09090b;
+    transform: rotate(45deg);
+    left: 7px;
+    top: 3px;
+}
+
+.consent-text {
+    color: #d4d4d8;
+    font-size: 13px;
+    line-height: 1.55;
+}
+
+.button {
+    position: relative;
+    width: 100%;
+    height: 54px;
+    margin-top: 18px;
+    border: 0;
+    border-radius: 14px;
+    background: #f4f4f5;
+    color: #09090b;
+    font-weight: 900;
+    font-size: 14px;
+    letter-spacing: .4px;
+    cursor: pointer;
+    overflow: hidden;
+    transition:
+        transform .2s,
+        opacity .2s;
+}
+
+.button:hover:not(:disabled) {
+    transform: translateY(-2px);
+}
+
+.button:active:not(:disabled) {
+    transform: translateY(0);
+}
+
+.button:disabled {
+    opacity: .35;
     cursor: not-allowed;
 }
 
+.button.loading {
+    pointer-events: none;
+}
+
+.button.loading .button-text {
+    opacity: 0;
+}
+
+.loader {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 22px;
+    height: 22px;
+    transform:
+        translate(-50%,-50%);
+    border-radius: 50%;
+    border: 3px solid #d4d4d8;
+    border-top-color: #09090b;
+    animation:
+        spin .7s linear infinite;
+    display: none;
+}
+
+.button.loading .loader {
+    display: block;
+}
+
+@keyframes spin {
+    to {
+        transform:
+            translate(-50%,-50%)
+            rotate(360deg);
+    }
+}
+
 .status {
-    margin-top: 20px;
-    padding: 15px;
-    border-radius: 12px;
-    background: #18181b;
-    color: #a1a1aa;
     display: none;
-}
-
-.data {
     margin-top: 18px;
+    padding: 15px;
+    border-radius: 13px;
+    background: #18181b;
+    border: 1px solid #27272a;
+    color: #d4d4d8;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.status.show {
+    display: block;
+    animation:
+        statusIn .3s ease both;
+}
+
+@keyframes statusIn {
+    from {
+        opacity: 0;
+        transform: translateY(5px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.session {
     display: none;
+    margin-top: 14px;
+    padding: 14px;
+    border-radius: 13px;
+    background: #09090b;
+    border: 1px solid #27272a;
 }
 
-.row {
-    padding: 12px 0;
-    border-bottom: 1px solid #27272a;
-}
-
-.label {
+.session-title {
     color: #71717a;
-    font-size: 12px;
+    font-size: 11px;
     text-transform: uppercase;
+    letter-spacing: .8px;
+    margin-bottom: 7px;
 }
 
-.value {
-    margin-top: 4px;
+.session-id {
+    color: #d4d4d8;
+    font-family: monospace;
+    font-size: 12px;
     word-break: break-all;
 }
 
-.small {
-    font-size: 12px;
-    color: #71717a;
+.footer {
     margin-top: 18px;
+    color: #52525b;
+    font-size: 11px;
+    text-align: center;
 }
+
+.hidden {
+    display: none !important;
+}
+
 </style>
+
 </head>
 
 <body>
+
+<div class="background">
+    <div class="glow"></div>
+</div>
 
 <div class="container">
 
 <div class="card">
 
-<div class="logo">PG</div>
+<div class="logo">
+PG
+</div>
 
-<h1>Accesso</h1>
+<div class="badge">
+<span class="dot"></span>
+SESSION SYSTEM
+</div>
 
-<p>
-Prima di continuare, leggi l'informativa e scegli esplicitamente
-se vuoi autorizzare la sessione.
-</p>
+<h1>
+Benvenuto
+</h1>
 
-<div class="notice">
+<div class="subtitle">
+Prima di continuare, consulta l'informativa
+e scegli esplicitamente se autorizzare
+la registrazione della sessione.
+</div>
 
-<label class="checkbox">
+<div class="banner">
 
-<input type="checkbox" id="consent">
+<div class="banner-title">
+Informativa sulla sessione
+</div>
 
-<span>
-Acconsento alla registrazione di questa sessione per lo scopo
-dichiarato nella pagina.
+<div class="banner-text">
+La registrazione viene effettuata solo dopo
+il consenso esplicito. La sessione utilizza
+un identificatore casuale separato.
+</div>
+
+</div>
+
+<div class="consent">
+
+<label>
+
+<input
+id="consent"
+type="checkbox"
+>
+
+<span class="consent-text">
+Ho letto l'informativa e acconsento
+alla registrazione degli eventi della
+mia sessione per lo scopo dichiarato.
 </span>
 
 </label>
 
 </div>
 
-<button id="continue" disabled>
+<button
+id="continueButton"
+class="button"
+disabled
+>
+
+<span class="button-text">
 CONSENTI E CONTINUA
+</span>
+
+<span class="loader"></span>
+
 </button>
 
-<div class="status" id="status"></div>
+<div
+id="status"
+class="status"
+></div>
 
-<div class="data" id="data">
+<div
+id="sessionBox"
+class="session"
+>
 
-<div class="row">
-<div class="label">Sessione</div>
-<div class="value" id="session"></div>
+<div class="session-title">
+Session ID
 </div>
 
-<div class="row">
-<div class="label">Stato</div>
-<div class="value" id="state"></div>
-</div>
-
-<div class="row">
-<div class="label">Precisione posizione</div>
-<div class="value" id="accuracy"></div>
-</div>
+<div
+id="sessionId"
+class="session-id"
+></div>
 
 </div>
 
-<div class="small">
-La sessione utilizza un identificatore casuale separato.
+<div class="footer">
+Pugilain Session System
 </div>
 
 </div>
@@ -499,499 +529,372 @@ La sessione utilizza un identificatore casuale separato.
 
 <script>
 
-const params = new URLSearchParams(window.location.search);
+const PROJECT_TOKEN = "__TOKEN__";
 
-let token = params.get("token");
+const consent =
+    document.getElementById(
+        "consent"
+    );
 
-if (!token) {
-    token = crypto.randomUUID();
+const button =
+    document.getElementById(
+        "continueButton"
+    );
+
+const statusBox =
+    document.getElementById(
+        "status"
+    );
+
+const sessionBox =
+    document.getElementById(
+        "sessionBox"
+    );
+
+const sessionIdBox =
+    document.getElementById(
+        "sessionId"
+    );
+
+const sessionId =
+    crypto.randomUUID();
+
+sessionIdBox.textContent =
+    sessionId;
+
+function showStatus(message) {
+
+    statusBox.textContent =
+        message;
+
+    statusBox.classList.add(
+        "show"
+    );
 }
 
-const consent = document.getElementById("consent");
-const button = document.getElementById("continue");
-const statusBox = document.getElementById("status");
-const dataBox = document.getElementById("data");
+async function sendEvent(type) {
 
-document.getElementById("session").textContent = token;
+    const response =
+        await fetch(
+            "/.netlify/functions/event",
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type":
+                        "application/json"
+                },
+                body: JSON.stringify({
+                    token:
+                        PROJECT_TOKEN,
 
-consent.addEventListener("change", function() {
-    button.disabled = !consent.checked;
-});
+                    session:
+                        sessionId,
 
-function showStatus(text) {
-    statusBox.style.display = "block";
-    statusBox.textContent = text;
-}
+                    type:
+                        type,
 
-async function sendEvent(type, extra = {}) {
+                    consent:
+                        true,
 
-    const endpoint = "/api/event";
-
-    const payload = {
-        token: token,
-        event: {
-            type: type,
-            ...extra
-        }
-    };
-
-    try {
-
-        const response = await fetch(endpoint, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify(payload)
-        });
-
-        return await response.json();
-
-    } catch (error) {
-
-        return {
-            ok: false,
-            error: "backend_unavailable"
-        };
-
-    }
-}
-
-button.addEventListener("click", async function() {
-
-    if (!consent.checked) {
-        return;
-    }
-
-    button.disabled = true;
-
-    showStatus("Registrazione del consenso...");
-
-    await sendEvent("consent", {
-        consent: true
-    });
-
-    await sendEvent("session_started");
-
-    dataBox.style.display = "block";
-
-    document.getElementById("state").textContent =
-        "Sessione autorizzata";
-
-    if (!navigator.geolocation) {
-
-        showStatus(
-            "La geolocalizzazione non è disponibile in questo browser."
+                    timestamp:
+                        new Date()
+                            .toISOString()
+                })
+            }
         );
 
-        return;
+    if (!response.ok) {
+        throw new Error(
+            "Request failed"
+        );
     }
 
-    showStatus(
-        "Sessione autorizzata. Se richiesto, puoi concedere la posizione al browser."
-    );
+    return response.json();
+}
 
-    navigator.geolocation.getCurrentPosition(
+consent.addEventListener(
+    "change",
+    function() {
 
-        async function(position) {
+        button.disabled =
+            !consent.checked;
 
-            const accuracy = Math.round(
-                position.coords.accuracy
-            );
+    }
+);
 
-            document.getElementById("accuracy").textContent =
-                accuracy + " metri";
+button.addEventListener(
+    "click",
+    async function() {
 
-            await sendEvent("location_available", {
-                location_available: true,
-                accuracy_meters: accuracy
-            });
-
-            showStatus(
-                "Sessione completata."
-            );
-
-        },
-
-        async function() {
-
-            document.getElementById("state").textContent =
-                "Sessione autorizzata senza posizione";
-
-            await sendEvent("location_available", {
-                location_available: false
-            });
-
-            showStatus(
-                "Hai autorizzato la sessione, ma la posizione non è stata fornita."
-            );
-
-        },
-
-        {
-            enableHighAccuracy: true,
-            timeout: 15000,
-            maximumAge: 0
+        if (!consent.checked) {
+            return;
         }
 
-    );
+        button.classList.add(
+            "loading"
+        );
 
-});
+        showStatus(
+            "Verifica del consenso..."
+        );
 
-sendEvent("page_opened");
+        try {
 
-</script>
+            await sendEvent(
+                "consent"
+            );
 
-</body>
-</html>
-'''
+            showStatus(
+                "Sessione autorizzata. Avvio..."
+            );
 
-    path = os.path.join(PUBLIC_DIR, "index.html")
+            await new Promise(
+                resolve =>
+                    setTimeout(
+                        resolve,
+                        600
+                    )
+            );
 
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(html)
+            await sendEvent(
+                "session_started"
+            );
 
-    return path
+            sessionBox.style.display =
+                "block";
 
+            showStatus(
+                "Sessione avviata correttamente."
+            );
 
-DASHBOARD_HTML = r'''<!DOCTYPE html>
-<html lang="it">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Pugilain Geo Local</title>
+            button.classList.remove(
+                "loading"
+            );
 
-<style>
-* {
-    box-sizing: border-box;
-}
+            button.querySelector(
+                ".button-text"
+            ).textContent =
+                "SESSIONE ATTIVA";
 
-body {
-    margin: 0;
-    background: #09090b;
-    color: #f4f4f5;
-    font-family: Arial, Helvetica, sans-serif;
-}
+        } catch(error) {
 
-header {
-    padding: 25px;
-    border-bottom: 1px solid #27272a;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
+            button.classList.remove(
+                "loading"
+            );
 
-h1 {
-    margin: 0;
-    font-size: 22px;
-}
+            showStatus(
+                "Impossibile contattare il servizio."
+            );
 
-main {
-    padding: 25px;
-    max-width: 1200px;
-    margin: auto;
-}
+            button.disabled = false;
 
-.stats {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 15px;
-    margin-bottom: 25px;
-}
-
-.stat {
-    padding: 20px;
-    background: #111113;
-    border: 1px solid #27272a;
-    border-radius: 14px;
-}
-
-.stat-number {
-    font-size: 28px;
-    font-weight: bold;
-}
-
-.stat-label {
-    color: #71717a;
-    margin-top: 5px;
-}
-
-.panel {
-    background: #111113;
-    border: 1px solid #27272a;
-    border-radius: 14px;
-    overflow: hidden;
-}
-
-.panel-head {
-    padding: 18px;
-    border-bottom: 1px solid #27272a;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
-
-button {
-    border: 0;
-    border-radius: 9px;
-    padding: 9px 13px;
-    cursor: pointer;
-}
-
-table {
-    width: 100%;
-    border-collapse: collapse;
-}
-
-th,
-td {
-    text-align: left;
-    padding: 14px;
-    border-bottom: 1px solid #27272a;
-}
-
-th {
-    color: #71717a;
-    font-size: 12px;
-    text-transform: uppercase;
-}
-
-code {
-    color: #d4d4d8;
-    word-break: break-all;
-}
-
-@media(max-width:700px) {
-    .stats {
-        grid-template-columns: 1fr;
-    }
-
-    table {
-        font-size: 12px;
-    }
-
-    th:nth-child(3),
-    td:nth-child(3) {
-        display: none;
-    }
-}
-</style>
-</head>
-
-<body>
-
-<header>
-<h1>Pugilain Geo · Local</h1>
-<div id="connection">ONLINE</div>
-</header>
-
-<main>
-
-<div class="stats">
-
-<div class="stat">
-<div class="stat-number" id="sessions">0</div>
-<div class="stat-label">Sessioni</div>
-</div>
-
-<div class="stat">
-<div class="stat-number" id="events">0</div>
-<div class="stat-label">Eventi</div>
-</div>
-
-<div class="stat">
-<div class="stat-number" id="active">0</div>
-<div class="stat-label">Sessioni attive</div>
-</div>
-
-</div>
-
-<div class="panel">
-
-<div class="panel-head">
-<strong>Eventi recenti</strong>
-<button onclick="loadData()">Aggiorna</button>
-</div>
-
-<table>
-
-<thead>
-
-<tr>
-<th>Ora</th>
-<th>Token</th>
-<th>Evento</th>
-<th>Dati</th>
-</tr>
-
-</thead>
-
-<tbody id="rows"></tbody>
-
-</table>
-
-</div>
-
-</main>
-
-<script>
-
-async function loadData() {
-
-    try {
-
-        const stats = await fetch(
-            "/api/stats",
-            {cache: "no-store"}
-        ).then(r => r.json());
-
-        document.getElementById("sessions").textContent =
-            stats.sessions;
-
-        document.getElementById("events").textContent =
-            stats.events;
-
-        document.getElementById("active").textContent =
-            stats.active_sessions;
-
-        const data = await fetch(
-            "/api/history",
-            {cache: "no-store"}
-        ).then(r => r.json());
-
-        const rows = document.getElementById("rows");
-
-        rows.innerHTML = "";
-
-        const list = [...data.history].reverse();
-
-        for (const item of list) {
-
-            const tr = document.createElement("tr");
-
-            const date = new Date(
-                item.timestamp
-            ).toLocaleString();
-
-            const details =
-                JSON.stringify(item.event);
-
-            tr.innerHTML =
-                "<td>" + date + "</td>" +
-                "<td><code>" +
-                escapeHtml(item.token) +
-                "</code></td>" +
-                "<td>" +
-                escapeHtml(item.event.type || "") +
-                "</td>" +
-                "<td><code>" +
-                escapeHtml(details) +
-                "</code></td>";
-
-            rows.appendChild(tr);
         }
 
-    } catch(error) {
-
-        document.getElementById(
-            "connection"
-        ).textContent = "OFFLINE";
-
     }
-
-}
-
-function escapeHtml(value) {
-
-    return String(value)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#039;");
-
-}
-
-loadData();
-
-setInterval(
-    loadData,
-    3000
 );
 
 </script>
 
 </body>
+
 </html>
 '''
 
+index_html = index_html.replace(
+    "__TOKEN__",
+    TOKEN
+)
 
-def print_banner():
-
-    print()
-    print("==============================================")
-    print("          PUGILAIN GEO LOCAL")
-    print("==============================================")
-    print()
-    print("Cartella:")
-    print(BASE_DIR)
-    print()
-    print("Cartella Netlify:")
-    print(PUBLIC_DIR)
-    print()
-    print("Index:")
-    print(os.path.join(PUBLIC_DIR, "index.html"))
-    print()
-    print("Pannello locale:")
-    print("http://127.0.0.1:5000")
-    print()
-    print("Cronologia:")
-    print(HISTORY_FILE)
-    print()
-    print("Token:")
-    print(TOKENS_FILE)
-    print()
-    print("==============================================")
-    print()
+save(
+    INDEX_FILE,
+    index_html
+)
 
 
-def run_server():
+netlify_toml = r'''[build]
+publish = "."
+functions = "netlify/functions"
 
-    server = ThreadingHTTPServer(
-        (HOST, PORT),
-        LocalHandler
-    )
+[functions]
+node_bundler = "esbuild"
+'''
 
-    print_banner()
-
-    try:
-        webbrowser.open(
-            "http://127.0.0.1:5000"
-        )
-    except Exception:
-        pass
-
-    print(
-        "Server avviato su "
-        + HOST
-        + ":"
-        + str(PORT)
-    )
-
-    print(
-        "CTRL+C per terminare."
-    )
-
-    server.serve_forever()
+save(
+    TOML_FILE,
+    netlify_toml
+)
 
 
-if __name__ == "__main__":
+event_js = r'''exports.handler = async function(event) {
 
-    index_path = create_netlify_index()
+    if (event.httpMethod !== "POST") {
 
-    print()
-    print("FILE NETLIFY CREATO:")
-    print(index_path)
-    print()
+        return {
+            statusCode: 405,
+            headers: {
+                "Content-Type":
+                    "application/json"
+            },
+            body: JSON.stringify({
+                ok: false,
+                error:
+                    "Method not allowed"
+            })
+        };
 
-    run_server()
+    }
+
+    let data;
+
+    try {
+
+        data = JSON.parse(
+            event.body || "{}"
+        );
+
+    } catch(error) {
+
+        return {
+            statusCode: 400,
+            headers: {
+                "Content-Type":
+                    "application/json"
+            },
+            body: JSON.stringify({
+                ok: false,
+                error:
+                    "Invalid JSON"
+            })
+        };
+
+    }
+
+    if (
+        typeof data.token !== "string" ||
+        typeof data.session !== "string" ||
+        typeof data.type !== "string" ||
+        data.consent !== true
+    ) {
+
+        return {
+            statusCode: 400,
+            headers: {
+                "Content-Type":
+                    "application/json"
+            },
+            body: JSON.stringify({
+                ok: false,
+                error:
+                    "Invalid event"
+            })
+        };
+
+    }
+
+    console.log(
+        JSON.stringify({
+            token:
+                data.token,
+
+            session:
+                data.session,
+
+            type:
+                data.type,
+
+            timestamp:
+                data.timestamp
+        })
+    );
+
+    return {
+        statusCode: 200,
+        headers: {
+            "Content-Type":
+                "application/json"
+        },
+        body: JSON.stringify({
+            ok: true,
+            saved: true,
+            session:
+                data.session
+        })
+    };
+
+};
+'''
+
+save(
+    FUNCTION_FILE,
+    event_js
+)
+
+
+readme = """PUGILAIN NETLIFY
+
+1. Esegui pugilain.py.
+
+2. Troverai questa cartella sul Desktop:
+
+PugilainNetlify
+
+3. Dentro troverai:
+
+index.html
+netlify.toml
+config.json
+history.json
+netlify/functions/event.js
+
+4. Su Netlify importa l'intera cartella PugilainNetlify.
+
+5. NON caricare soltanto index.html.
+
+6. Dopo il deploy apri il dominio Netlify.
+
+7. Il token del progetto è già incorporato
+nell'index.html.
+
+8. Ogni apertura della pagina genera
+un session ID separato.
+
+9. Gli eventi vengono gestiti dalla
+Netlify Function.
+
+Endpoint:
+
+/.netlify/functions/event
+"""
+
+save(
+    os.path.join(BASE_DIR, "README.txt"),
+    readme
+)
+
+
+print()
+print("==============================================")
+print("          PUGILAIN NETLIFY GENERATOR")
+print("==============================================")
+print()
+print("PROGETTO CREATO:")
+print(BASE_DIR)
+print()
+print("INDEX:")
+print(INDEX_FILE)
+print()
+print("FUNCTION:")
+print(FUNCTION_FILE)
+print()
+print("TOKEN:")
+print(TOKEN)
+print()
+print("IMPORTA SU NETLIFY L'INTERA CARTELLA:")
+print(BASE_DIR)
+print()
+print("NON SOLO index.html")
+print()
+print("==============================================")
+print("               COMPLETATO")
+print("==============================================")
+print()
